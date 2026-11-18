@@ -1,0 +1,5 @@
+#!/bin/sh
+# mock stock dd-nand: records argv, writes like dd conv=notrunc
+echo "dd-nand $*" >> "$MOCK_LOG"
+[ -n "${MOCK_DDNAND_FAIL:-}" ] && { cat >/dev/null; exit 1; }
+exec dd "$@" conv=notrunc 2>/dev/null

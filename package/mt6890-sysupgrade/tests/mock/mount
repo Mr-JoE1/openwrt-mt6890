@@ -1,0 +1,5 @@
+#!/bin/sh
+echo "mount $*" >> "$MOCK_LOG"
+for a in "$@"; do last="$a"; done
+# the "filesystem" is a persistent dir per ubi volume
+mkdir -p "$MOCK_DEV/fs"; rm -rf "$last"; ln -s "$MOCK_DEV/fs" "$last"

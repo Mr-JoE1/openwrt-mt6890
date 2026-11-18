@@ -1,0 +1,39 @@
+# mt6890-mtkwifi defaults: stock mt_wifi.ko MT7915 DBDC via netifd handler
+# "mtwifi" (/lib/netifd/wireless/mtwifi.sh). Radio names = stock main
+# ifnames (evidence/uci-full.txt: wifi-iface device 'ra0' / 'rai0').
+# Channels 6 / 36 = stock templates mt7915.1.dat / mt7915.2.dat.
+# Radios ship DISABLED: the key below is a placeholder - set your own key,
+# then: uci set wireless.ra0.disabled=0; uci set wireless.rai0.disabled=0;
+#       uci commit wireless; wifi reload   (or: ubus call network reload)
+
+config wifi-device 'ra0'
+	option type 'mtwifi'
+	option main_ifname 'ra0'
+	option band '2g'
+	option channel '6'
+	option htmode 'HT40'
+	option disabled '1'
+
+config wifi-iface 'default_ra0'
+	option device 'ra0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'DWR-2000M'
+	option encryption 'psk2'
+	option key 'CHANGE-ME-wpa2psk'
+
+config wifi-device 'rai0'
+	option type 'mtwifi'
+	option main_ifname 'rai0'
+	option band '5g'
+	option channel '36'
+	option htmode 'VHT80'
+	option disabled '1'
+
+config wifi-iface 'default_rai0'
+	option device 'rai0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'DWR-2000M-5G'
+	option encryption 'psk2'
+	option key 'CHANGE-ME-wpa2psk'

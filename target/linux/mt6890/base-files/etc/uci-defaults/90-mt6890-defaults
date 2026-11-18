@@ -1,0 +1,23 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# System defaults carried over from stock (evidence/uci-full.txt:
+# system.@system[0].hostname='MobileRouter', zonename='Asia/Dubai',
+# timezone='<+04>-4'). uci-defaults scripts are deleted by
+# /etc/init.d/boot after they exit 0.
+
+. /lib/functions.sh
+
+case "$(board_name)" in
+dlink,dwr-2000m-a3|\
+mediatek,evb6890v1_64_cpe_nand)
+	uci -q batch <<-EOF
+		set system.@system[0].hostname='MobileRouter'
+		set system.@system[0].zonename='Asia/Dubai'
+		set system.@system[0].timezone='<+04>-4'
+		commit system
+	EOF
+	;;
+esac
+
+exit 0

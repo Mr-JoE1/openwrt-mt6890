@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# LED names verified on the running stock firmware (P0.5, /sys/class/leds).
+# gpio_leds led9501..led9515 + MT6330 isink RGB (wifi). Note led9515 carries
+# two functions (blue:power and red:wifi-led) - both are separate sysfs names.
+
+. /lib/functions/uci-defaults.sh
+
+board=$(board_name)
+
+board_config_update
+
+case "$board" in
+dlink,dwr-2000m-a3|\
+mediatek,evb6890v1_64_cpe_nand)
+	# power: green on, red/blue off
+	ucidef_set_led_default "power_red"   "POWER red"   "led9513:red:power"   "0"
+	ucidef_set_led_default "power_green" "POWER green" "led9514:green:power" "1"
+	ucidef_set_led_default "power_blue"  "POWER blue"  "led9515:blue:power"  "0"
+	# wifi RGB (MT6330 isink) - triggers land with the mtwifi handler (P4)
+	ucidef_set_led_default "wifi_red"    "WIFI red"    "led9515:red:wifi-led"   "0"
+	ucidef_set_led_default "wifi_green"  "WIFI green"  "led9516:green:wifi-led" "0"
+	ucidef_set_led_default "wifi_blue"   "WIFI blue"   "led9517:blue:wifi-led"  "0"
+	# cellular - driven by netifd-proto-mtkmipc / mt6890-modem (P3)
+	ucidef_set_led_default "sim"         "SIM"         "led9501:red:sim"            "0"
+	ucidef_set_led_default "cell_stat"   "CELL status" "led9502:red:cellular-stat"  "0"
+	ucidef_set_led_default "cell_data"   "CELL data"   "led9504:red:cellular-data"  "0"
+	ucidef_set_led_default "cell_rat"    "CELL RAT"    "led9505:red:cellular-rat"   "0"
+	ucidef_set_led_default "nr_red"      "NR red"      "led9507:red:nr-rssi"        "0"
+	ucidef_set_led_default "nr_green"    "NR green"    "led9508:green:nr-rssi"      "0"
+	ucidef_set_led_default "nr_blue"     "NR blue"     "led9509:blue:nr-rssi"       "0"
+	ucidef_set_led_default "lte_red"     "LTE red"     "led9510:red:lte-rssi"       "0"
+	ucidef_set_led_default "lte_green"   "LTE green"   "led9511:green:lte-rssi"     "0"
+	ucidef_set_led_default "lte_blue"    "LTE blue"    "led9512:blue:lte-rssi"      "0"
+	;;
+esac
+
+board_config_flush
+
+exit 0

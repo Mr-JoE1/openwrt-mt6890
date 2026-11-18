@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "umount $*" >> "$MOCK_LOG"
+[ -L "$1" ] && rm -f "$1"; mkdir -p "$1"

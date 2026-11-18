@@ -1,0 +1,20 @@
+#!/bin/sh
+# Mock of the stock /sbin/wifi (Lua, X28 lineage):
+#   wifi <up|down|reset|reload|restart|status|detect> [devname]
+# Records argv to $MOCK_WIFI_LOG; up/down toggle the IFF_UP bit of the fake
+# /sys/class/net/<main_ifname>/flags (devname MT7915D.1.1 -> ra0, .1.2 -> rai0,
+# as l1dat_parser.lua devname_ridx resolves them).
+echo "wifi $*" >> "$MOCK_WIFI_LOG"
+case "$2" in
+MT7915D.1.1) ifn=ra0 ;;
+MT7915D.1.2) ifn=rai0 ;;
+"") ifn="" ;;
+*) echo "mock-wifi: unknown dev $2" >&2; exit 1 ;;
+esac
+case "$1" in
+up)   [ -z "$ifn" ] || echo 0x1003 > "$MTWIFI_SYSNET/$ifn/flags" ;;
+down) [ -z "$ifn" ] || echo 0x1002 > "$MTWIFI_SYSNET/$ifn/flags" ;;
+status) echo "ra0       RTWIFI SoftAP  ESSID:\"canned\"" ;;
+*) ;;
+esac
+exit 0

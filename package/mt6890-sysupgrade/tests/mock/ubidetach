@@ -1,0 +1,4 @@
+#!/bin/sh
+echo "ubidetach $*" >> "$MOCK_LOG"
+[ "$1" = -d ] && rm -rf "$MT6890_SYSUBI/ubi$2" "$MT6890_SYSUBI/ubi$2"_*
+exit 0

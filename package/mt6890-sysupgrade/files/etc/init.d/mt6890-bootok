@@ -1,0 +1,39 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Good-boot marker: after the base boot sequence (S95 done) reset the misc
+# record's tries counter of the slot we are running from, so the preloader
+# does not count this boot towards the A/B fallback. Replaces the stock
+# stock boot-done init script (START=99, not imported: it clones the
+# running slot over the other).
+# All record I/O is in /usr/bin/mt6890-bootctl (bootok); see NOTES-p2 "P5d".
+#
+# Never blocks boot: runs in the background, logs, always exits 0.
+# Idempotent: nothing is written when tries is already 00.
+
+START=96
+
+MT6890_BOOTCTL="${MT6890_BOOTCTL:-/usr/bin/mt6890-bootctl}"
+
+mt6890_bootok_run() {
+	local out rc
+	if [ ! -x "$MT6890_BOOTCTL" ]; then
+		logger -t mt6890-bootok "$MT6890_BOOTCTL not found - tries not reset"
+		return 0
+	fi
+	out="$("$MT6890_BOOTCTL" bootok 2>&1)"
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		logger -t mt6890-bootok "$out"
+	else
+		# misc unreadable / not an A/B record / running slot unknown:
+		# leave it alone, the boot goes on
+		logger -t mt6890-bootok "bootok skipped (rc=$rc): $out"
+	fi
+	return 0
+}
+
+start() {
+	mt6890_bootok_run >/dev/null 2>&1 &
+	return 0
+}
