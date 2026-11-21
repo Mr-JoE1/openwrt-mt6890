@@ -181,7 +181,7 @@ sh package/mt6890-sysupgrade/tests/run.sh    # 120 cases
 | Hardware and firmware analysis | Done |
 | Target tree, vendor import, full image build | Done |
 | Cellular, Wi-Fi, A/B sysupgrade, bootok packages | Done, mocked tests 243/243 |
-| Image artefact verification | **PASS**: final factory image sha256 `065c67d7…` (64 MiB UBI, 136/136 modules) |
+| Image artefact verification | **PASS**: final factory image sha256 `4c17d32a…` (64 MiB UBI, 136/136 modules) |
 | On-device flash | **Pending.** The image has not been flashed to hardware yet. |
 
 Open questions that only hardware can answer: whether LK accepts a modified rootfs with the stock `rootfs_sig`, the

@@ -28,6 +28,10 @@ MT6890_CMDLINE="${MT6890_CMDLINE:-/proc/cmdline}"
 MT6890_DEVDIR="${MT6890_DEVDIR:-/dev}"
 MT6890_DDNAND="${MT6890_DDNAND:-}"
 MT6890_DRYRUN="${MT6890_DRYRUN:-0}"
+# "armed" flag: while it exists the boot-time bootok (init.d/mt6890-bootok)
+# is suppressed, so the preloader tries fallback stays live until a human
+# runs 'mt6890-bootctl confirm'. Lives in the rootfs overlay.
+MT6890_ARMED_FLAG="${MT6890_ARMED_FLAG:-/etc/mt6890-armed}"
 
 MT6890_BC_OFF=2048
 MT6890_BC_STRIDE=262144

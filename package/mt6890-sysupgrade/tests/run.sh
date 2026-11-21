@@ -43,6 +43,7 @@ export MT6890_INTENT="$T/intent"
 export MT6890_MNT="$T/newroot"
 export MT6890_LIB="$F/lib/upgrade/mt6890-bootctl.sh"
 export MT6890_DDNAND="$T/bin/dd-nand"
+export MT6890_ARMED_FLAG="$T/armed"
 export PATH="$T/bin:$PATH"
 
 ff() { tr '\000' '\377' < /dev/zero | head -c "$1"; }
@@ -388,6 +389,58 @@ s0=$(date +%s)
 MT6890_BOOTCTL="$T/slow" $TEST_SHELL -c ". '$INIT'; start" >/dev/null 2>&1
 s1=$(date +%s)
 check "start returns immediately (does not block boot on a slow bootctl)" [ $((s1 - s0)) -lt 2 ]
+
+echo "== armed first boot (MT6890_ARMED_FLAG)"
+# the "start returns immediately" case above leaves a detached job (sleep 3,
+# then logger -> $MOCK_LOG); let it finish so it cannot pollute argv counts
+while [ "$(date +%s)" -lt $((s0 + 5)) ]; do sleep 1; done
+check "package ships files/etc/mt6890-armed (empty)" [ -f "$F/etc/mt6890-armed" ] && [ ! -s "$F/etc/mt6890-armed" ]
+check "Makefile installs /etc/mt6890-armed" grep -q '^	$(INSTALL_DATA) ./files/etc/mt6890-armed $(1)/etc/$' "$PKG/Makefile"
+check "uci-defaults never removes the armed flag" hasnt "$F/etc/uci-defaults/95-mt6890-uci-migrate" "mt6890-armed"
+reset_flash "$A_TRY" "ubi.mtd=29"; : > "$MT6890_ARMED_FLAG"
+cp "$T/dev/mtd3" "$T/m3"
+I "start; wait" >/dev/null 2>&1; rc=$?
+check "start with flag present (A running, tries 03): rc 0, misc unchanged, no dd-nand" [ $rc -eq 0 ] && cmp -s "$T/m3" "$T/dev/mtd3" && hasnt "$MOCK_LOG" "^dd-nand"
+check "  logger line says armed, tries NOT reset" has "$MOCK_LOG" "^logger -t mt6890-bootok armed: tries NOT reset (run 'mt6890-bootctl confirm'"
+check "  flag still present after boot" [ -e "$MT6890_ARMED_FLAG" ]
+reset_flash "$A_TRY" "ubi.mtd=29"; rm -f "$MT6890_ARMED_FLAG"
+I "start; wait" >/dev/null 2>&1; rc=$?
+check "start with flag absent: tries cleared as before, no armed log" [ $rc -eq 0 ] && eq "$(misc_payload 0)" 0f0000000e050100 && hasnt "$MOCK_LOG" "armed"
+reset_flash "$A_TRY" "console=ttyS0 ubi.mtd=29"; : > "$MT6890_ARMED_FLAG"
+cp "$T/dev/mtd3" "$T/m3"
+BC confirm >"$T/out" 2>"$T/err"; rc=$?
+check "confirm (flag present, A running): rc 0" [ $rc -eq 0 ] || cat "$T/out" "$T/err"
+check "  A tries 03->00 only, B tries 05 kept (4 copies)" eq "$(misc_payload 0)$(misc_payload 1)$(misc_payload 2)$(misc_payload 3)" 0f0000000e0501000f0000000e0501000f0000000e0501000f0000000e050100
+check "  exactly 4 bytes changed in misc" eq "$(ndiff "$T/m3" "$T/dev/mtd3")" 4
+check "  dd-nand: 1 byte x4 at 2057/264201/526345/788489, nothing else" eq "$(grep -c '^dd-nand of=.*/mtd3 seek=\(2057\|264201\|526345\|788489\) bs=1 count=1$' "$MOCK_LOG")$(wc -l < "$MOCK_LOG" | tr -d ' ')" 44
+check "  flag file removed" [ ! -e "$MT6890_ARMED_FLAG" ]
+check "  stdout: confirmed: slot a tries=00" has "$T/out" "^confirmed: slot a tries=00, fallback disarmed\$"
+reset_flash "$A_TRY" "ubi.mtd=29"; : > "$MT6890_ARMED_FLAG"
+MOCK_DDNAND_FAIL=1 BC confirm >/dev/null 2>&1; rc=$?
+check "confirm with dd-nand failing: rc != 0, flag still present" [ $rc -ne 0 ] && [ -e "$MT6890_ARMED_FLAG" ]
+reset_flash "$A_TRY" "console=ttyS0"; : > "$MT6890_ARMED_FLAG"
+cp "$T/dev/mtd3" "$T/m3"
+BC confirm >/dev/null 2>&1; rc=$?
+check "confirm with running slot unknown: rc != 0, flag kept, misc untouched" [ $rc -ne 0 ] && [ -e "$MT6890_ARMED_FLAG" ] && cmp -s "$T/m3" "$T/dev/mtd3" && hasnt "$MOCK_LOG" "^dd-nand"
+reset_flash "$A_TRY" "ubi.mtd=29"; : > "$MT6890_ARMED_FLAG"
+cp "$T/dev/mtd3" "$T/m3"
+MT6890_DRYRUN=1 BC confirm >/dev/null 2>&1; rc=$?
+check "MT6890_DRYRUN=1 confirm: rc 0, misc unchanged, flag kept" [ $rc -eq 0 ] && cmp -s "$T/m3" "$T/dev/mtd3" && [ -e "$MT6890_ARMED_FLAG" ]
+reset_flash "$A_TRY" "ubi.mtd=29"; rm -f "$MT6890_ARMED_FLAG"
+check "status without flag: armed=no" has /dev/stdin "^armed=no\$" <<-EOF
+$(BC status)
+EOF
+out="$(BC arm 2>&1)"; rc=$?
+check "arm creates the flag, rc 0, prints hint" [ $rc -eq 0 ] && [ -e "$MT6890_ARMED_FLAG" ] && eq "$out" "armed: next boots will not reset tries until 'confirm'"
+BC arm >/dev/null 2>&1; rc=$?
+check "arm again: idempotent rc 0, flag present, no misc write" [ $rc -eq 0 ] && [ -e "$MT6890_ARMED_FLAG" ] && hasnt "$MOCK_LOG" "^dd-nand"
+check "status after arm: armed=yes" has /dev/stdin "^armed=yes\$" <<-EOF
+$(BC status)
+EOF
+BC confirm >/dev/null 2>&1
+check "status after confirm: armed=no" has /dev/stdin "^armed=no\$" <<-EOF
+$(BC status)
+EOF
 
 echo "== UCI migration (95-mt6890-uci-migrate)"
 UCI_BIN="${MT6890_TEST_UCI:-}"

@@ -1,5 +1,7 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-only
+# OpenWrt busybox ash supports local; START is read by /etc/rc.common.
+# shellcheck disable=SC3043,SC2034
 #
 # Good-boot marker: after the base boot sequence (S95 done) reset the misc
 # record's tries counter of the slot we are running from, so the preloader
@@ -8,15 +10,31 @@
 # running slot over the other).
 # All record I/O is in /usr/bin/mt6890-bootctl (bootok); see NOTES-p2 "P5d".
 #
+# ARMED first boot: while /etc/mt6890-armed exists (MT6890_ARMED_FLAG) this
+# script does NOT reset tries; it only logs. The image ships with that flag
+# (package file /etc/mt6890-armed, in the read-only rootfs, so every fresh
+# slot - first install or sysupgrade - starts armed) and nothing at boot
+# (uci-defaults included) removes it. Why: a 24.10 image that boots but is
+# unreachable (wrong LAN ports, Wi-Fi disabled) would otherwise disarm the
+# preloader fallback with no human in the loop -> permanent lockout without
+# UART. Only 'mt6890-bootctl confirm', run by someone who reached the
+# device, clears tries and removes the flag; until then every power cycle
+# counts towards the tries=3 fallback to the other slot.
+#
 # Never blocks boot: runs in the background, logs, always exits 0.
 # Idempotent: nothing is written when tries is already 00.
 
 START=96
 
 MT6890_BOOTCTL="${MT6890_BOOTCTL:-/usr/bin/mt6890-bootctl}"
+MT6890_ARMED_FLAG="${MT6890_ARMED_FLAG:-/etc/mt6890-armed}"
 
 mt6890_bootok_run() {
 	local out rc
+	if [ -e "$MT6890_ARMED_FLAG" ]; then
+		logger -t mt6890-bootok "armed: tries NOT reset (run 'mt6890-bootctl confirm' once the device is reachable)"
+		return 0
+	fi
 	if [ ! -x "$MT6890_BOOTCTL" ]; then
 		logger -t mt6890-bootok "$MT6890_BOOTCTL not found - tries not reset"
 		return 0

@@ -31,8 +31,10 @@ define Package/mt6890-sysupgrade/description
   lib/upgrade/platform.sh for the MT6890 A/B layout: writes the inactive
   rootfs_a/rootfs_b slot (raw mtd write of the UBI image, as stock), stores
   the config backup in the new slot's rootfs_data and switches the misc
-  boot record last. mt6890-bootctl: status / set <a|b> / rollback.
-  uci-defaults migration of stock ql_mipc / vendor UI profile config.
+  boot record last. mt6890-bootctl: status / set <a|b> / rollback /
+  bootok / confirm / arm. Ships /etc/mt6890-armed: the boot-time tries
+  reset stays suppressed until 'mt6890-bootctl confirm'.
+  uci-defaults migration of stock ql_mipc/stoneoim config.
 endef
 
 define Build/Compile
@@ -45,6 +47,7 @@ define Package/mt6890-sysupgrade/install
 	$(INSTALL_BIN) ./files/usr/bin/mt6890-bootctl $(1)/usr/bin/
 	$(INSTALL_BIN) ./files/etc/uci-defaults/95-mt6890-uci-migrate $(1)/etc/uci-defaults/
 	$(INSTALL_BIN) ./files/etc/init.d/mt6890-bootok $(1)/etc/init.d/
+	$(INSTALL_DATA) ./files/etc/mt6890-armed $(1)/etc/
 endef
 
 $(eval $(call BuildPackage,mt6890-sysupgrade))
