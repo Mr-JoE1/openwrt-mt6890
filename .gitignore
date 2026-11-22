@@ -1,5 +1,5 @@
 build/
 openwrt/
 evidence/
-bin/
+/bin/
 package/vendor/

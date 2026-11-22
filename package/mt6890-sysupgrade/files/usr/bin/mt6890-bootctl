@@ -1,0 +1,114 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# OpenWrt busybox ash supports local; the library path is runtime-only.
+# shellcheck disable=SC3043
+#
+# mt6890-bootctl - inspect / change the MT6890 A/B boot slot (misc record).
+# All logic lives in /lib/upgrade/mt6890-bootctl.sh (shared with sysupgrade).
+#
+#   mt6890-bootctl status          active (next-boot) slot, booted slot, record
+#   mt6890-bootctl set <a|b>       make <slot> the next-boot slot (tries=3)
+#   mt6890-bootctl rollback        set the slot that is NOT running, then
+#                                  print "reboot to apply" (does not reboot)
+#   mt6890-bootctl bootok          good boot: tries:=00 for the RUNNING slot
+#                                  (cmdline ubi.mtd=) only; nothing else written
+#   mt6890-bootctl confirm         human-confirmed good boot: bootok, then
+#                                  remove the armed flag (only if the write
+#                                  and its readback succeeded)
+#   mt6890-bootctl arm             create the armed flag: boot-time bootok is
+#                                  suppressed until 'confirm' (idempotent)
+# Env: MT6890_DRYRUN=1 prints the write without performing it (confirm then
+# keeps the flag). MT6890_ARMED_FLAG (default /etc/mt6890-armed).
+
+MT6890_LIB="${MT6890_LIB:-/lib/upgrade/mt6890-bootctl.sh}"
+# shellcheck source=/dev/null
+. "$MT6890_LIB" || { echo "mt6890-bootctl: cannot load $MT6890_LIB" >&2; exit 1; }
+
+usage() {
+	echo "usage: ${0##*/} status | set <a|b> | rollback | bootok | confirm | arm" >&2
+	exit 2
+}
+
+cmd_status() {
+	local rec act boot cons
+	rec="$(mt6890_bc_get)" || exit 1
+	act="$(mt6890_slot_active "$rec")" || act=unknown
+	boot="$(mt6890_slot_booted)" || boot=unknown
+	cons="$(mt6890_bc_consistent)"
+	echo "active=$act"
+	if [ "$act" = a ] || [ "$act" = b ]; then
+		echo "reserved=$(mt6890_slot_other "$act")"
+	else
+		echo "reserved=unknown"
+	fi
+	echo "booted=$boot"
+	echo "source=misc:$(mt6890_misc_dev)+$MT6890_BC_OFF"
+	echo "a_prio=$(mt6890_bc_byte "$rec" 8) a_tries=$(mt6890_bc_byte "$rec" 9) a_success=$(mt6890_bc_byte "$rec" 10) a_uptype=$(mt6890_bc_byte "$rec" 11)"
+	echo "b_prio=$(mt6890_bc_byte "$rec" 12) b_tries=$(mt6890_bc_byte "$rec" 13) b_success=$(mt6890_bc_byte "$rec" 14) b_uptype=$(mt6890_bc_byte "$rec" 15)"
+	echo "copies_consistent=$cons"
+	if [ -e "$MT6890_ARMED_FLAG" ]; then echo "armed=yes"; else echo "armed=no"; fi
+}
+
+cmd_set() {
+	[ -n "${1:-}" ] || usage
+	mt6890_bc_set "$1" || exit 1
+	echo "next boot: slot $1"
+}
+
+cmd_rollback() {
+	local cur tgt
+	cur="$(mt6890_slot_booted)" || cur="$(mt6890_slot_active)" || exit 1
+	tgt="$(mt6890_slot_other "$cur")"
+	mt6890_bc_set "$tgt" || exit 1
+	echo "next boot: slot $tgt (was running $cur) - reboot to apply"
+}
+
+# Unlike rollback there is no fallback to the misc "active" slot: if the
+# running slot cannot be proven from the cmdline, nothing is written.
+cmd_bootok() {
+	local cur
+	cur="$(mt6890_slot_booted)" || {
+		mt6890_log "bootok: running slot unknown (no usable ubi.mtd= in $MT6890_CMDLINE) - misc not touched"
+		exit 1
+	}
+	mt6890_bc_bootok "$cur" || exit 1
+	echo "bootok: slot $cur tries=00"
+}
+
+# Same write as bootok (1 byte x4 via dd-nand + readback); the flag is only
+# removed after that succeeded, so a failed confirm leaves the unit armed.
+cmd_confirm() {
+	local cur
+	cur="$(mt6890_slot_booted)" || {
+		mt6890_log "confirm: running slot unknown (no usable ubi.mtd= in $MT6890_CMDLINE) - misc not touched, still armed"
+		exit 1
+	}
+	mt6890_bc_bootok "$cur" || { mt6890_log "confirm: tries write failed - still armed"; exit 1; }
+	if mt6890_dryrun; then
+		echo "DRYRUN: would remove $MT6890_ARMED_FLAG"
+		return 0
+	fi
+	rm -f "$MT6890_ARMED_FLAG"
+	if [ -e "$MT6890_ARMED_FLAG" ]; then
+		mt6890_log "confirm: tries cleared but cannot remove $MT6890_ARMED_FLAG"
+		exit 1
+	fi
+	echo "confirmed: slot $cur tries=00, fallback disarmed"
+}
+
+cmd_arm() {
+	if [ ! -e "$MT6890_ARMED_FLAG" ]; then
+		: > "$MT6890_ARMED_FLAG" || { mt6890_log "arm: cannot create $MT6890_ARMED_FLAG"; exit 1; }
+	fi
+	echo "armed: next boots will not reset tries until 'confirm'"
+}
+
+case "${1:-}" in
+status) cmd_status ;;
+bootok) cmd_bootok ;;
+confirm) cmd_confirm ;;
+arm) cmd_arm ;;
+set) shift; cmd_set "$@" ;;
+rollback) cmd_rollback ;;
+*) usage ;;
+esac
