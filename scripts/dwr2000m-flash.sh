@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # shellcheck shell=sh
 #
-# dwr2000m-flash.sh v2 - first install of the 64 MiB UBI OpenWrt 24.10 image
+# dwr2000m-flash.sh v2.1 - first install of the 64 MiB UBI OpenWrt 24.10 image
 # on a D-Link DWR-2000M A3 that still runs the stock firmware. It is the
 # executable form of the wiki page "Flash-Plan" (public/wiki/Flash-Plan.md):
 # preflight, config backup + mandatory off-device partition dumps, fetch the
@@ -20,6 +20,8 @@
 # over A" warning in PHASE 0; mandatory off-device dump gate in PHASE 1;
 # new 'rehearse' subcommand (record-only dress rehearsal); the image ships
 # ARMED (mt6890-bootctl confirm).
+#
+# v2.1: PHASE 0 UBI-attach gate for rootfs_a; PHASE 1 hints: ssh user admin, ssh-rsa, ECC, live rootfs_b sha.
 #
 # Safety invariants:
 #  * never writes the running slot: only the reference layout (stock booted
@@ -43,7 +45,8 @@
 # precedence), MT6890_DDNAND, MT6890_DRYRUN=1 (print mtd/flash_erase/
 # nandwrite/dd-nand/tar/wget instead of running them), MT6890_TMPDIR
 # (default /tmp), MT6890_BACKUP_PATHS (default "/etc /data"),
-# MT6890_SYSFS_MTD (default /sys/class/mtd).
+# MT6890_SYSFS_MTD (default /sys/class/mtd), MT6890_SYSFS_UBI (default
+# /sys/class/ubi).
 #
 # Exit: 0 = ok, 1 = gate failed / aborted, 2 = usage error.
 
@@ -58,6 +61,7 @@ MT6890_DRYRUN="${MT6890_DRYRUN:-0}"
 MT6890_TMPDIR="${MT6890_TMPDIR:-/tmp}"
 MT6890_BACKUP_PATHS="${MT6890_BACKUP_PATHS:-/etc /data}"
 MT6890_SYSFS_MTD="${MT6890_SYSFS_MTD:-/sys/class/mtd}"
+MT6890_SYSFS_UBI="${MT6890_SYSFS_UBI:-/sys/class/ubi}"
 # mock-test hook only (deliberately not documented in usage)
 MT6890_SKIP_DUMP_GATE="${MT6890_SKIP_DUMP_GATE:-0}"
 
@@ -353,6 +357,24 @@ bad_block_gate() {
 	fi
 }
 
+ubi_attach_gate() { # slot A must not be attached to any UBI device (read-only)
+	if [ ! -d "$MT6890_SYSFS_UBI" ]; then
+		say "ubi attach map: unknown (sysfs missing) - continuing"
+		return 0
+	fi
+	_map=""
+	for _uf in "$MT6890_SYSFS_UBI"/ubi[0-9]*/mtd_num; do
+		[ -r "$_uf" ] || continue
+		_ud="${_uf%/mtd_num}"; _ud="${_ud##*/}"
+		_um="$(cat "$_uf" 2>/dev/null)"
+		if [ "$_um" = "$SLOT_A_NUM" ]; then
+			die "$SLOT_A_MTD (mtd$SLOT_A_NUM) is attached as $_ud; erasing it under UBI would corrupt the attach. Detach first ('ubidetach -m $SLOT_A_NUM') only if you know why it is attached - this script will not do it (nothing written)."
+		fi
+		_map="$_map $_ud: mtd${_um:-?};"
+	done
+	say "ubi attach map:${_map:- (no ubi devices attached)} - $SLOT_A_MTD (mtd$SLOT_A_NUM) not attached OK"
+}
+
 # --- fingerprint (diagnostic only) -------------------------------------------
 fingerprint() { # <file>: identical output on PC and router for identical files
 	[ -f "$1" ] || die "fingerprint: no such file: $1"
@@ -419,6 +441,7 @@ phase0() { # <flash|rehearse>
 		dryrun || have wget || die "'wget' not found"
 	fi
 	bad_block_gate
+	ubi_attach_gate
 	read_records "$MISC" || die "misc record check failed (all 4 copies must carry magic $BC_MAGIC)"
 	print_records
 	decode_record "$REC0"
@@ -490,17 +513,21 @@ phase1() {
 	} > "$BK/partitions.sha256"
 	sed 's/^/  /' "$BK/partitions.sha256"
 	say "Run these FROM THE PC (RAM on the unit is too small to hold 2 x 64 MiB; stream over ssh):"
-	say "  ssh root@<router> \"$(dump_cmd "$MISC")\" > misc.bin"
-	say "  ssh root@<router> \"$(dump_cmd "$ADEV")\" > rootfs_a.bin"
-	say "  ssh root@<router> \"$(dump_cmd "$BDEV")\" > rootfs_b.bin"
+	say "  (stock login user is 'admin', uid 0; OpenSSH >= 8.8 needs 'HostKeyAlgorithms +ssh-rsa' for the stock"
+	say "   dropbear host key - see Flash-Plan \"Prerequisites\")"
+	say "  ssh <user>@<router> \"$(dump_cmd "$MISC")\" > misc.bin"
+	say "  ssh <user>@<router> \"$(dump_cmd "$ADEV")\" > rootfs_a.bin"
+	say "  ssh <user>@<router> \"$(dump_cmd "$BDEV")\" > rootfs_b.bin"
 	say "  sha256sum misc.bin rootfs_a.bin rootfs_b.bin"
-	say "The three PC-side sums must equal the on-device sums above (also in $BK/partitions.sha256)."
+	say "nanddump may print \"ECC: N corrected bitflip(s)\" on stderr - corrected, harmless."
+	say "the RUNNING slot (rootfs_b) dumps a different sha256 each time (live UBI) - that is expected; rootfs_a and misc must match the sums above exactly."
+	say "PC-side misc and rootfs_a sums must equal the on-device sums above (also in $BK/partitions.sha256); rootfs_b is informational."
 	say "Also copy the backup dir and config tar to the PC (OpenSSH >= 9 needs -O if the router has no sftp-server):"
 	say "  scp -r <router>:$BK <router>:$_tgz <pc>/"
 	if [ "$MT6890_SKIP_DUMP_GATE" = 1 ]; then
 		say "WARNING: dump gate skipped by env"
 	else
-		confirm "Have you completed the off-device dumps of misc, rootfs_a, rootfs_b and verified their sha256 on the PC?" ||
+		confirm "Have you completed the off-device dumps of misc, rootfs_a, rootfs_b and verified the misc + rootfs_a sha256 on the PC?" ||
 			die "dump gate: off-device dumps not confirmed - stopped before PHASE 2 (nothing flashed)"
 	fi
 	say "PHASE 1 OK"
