@@ -34,6 +34,11 @@ endef
 define Package/mt6890-mtkmipc/install
 	$(INSTALL_DIR) $(1)/lib/netifd/proto
 	$(INSTALL_BIN) ./files/lib/netifd/proto/mtkmipc.sh $(1)/lib/netifd/proto/
+	$(INSTALL_DIR) $(1)/lib/mt6890
+	$(INSTALL_BIN) ./files/lib/mt6890/apn-wan-setup.sh $(1)/lib/mt6890/
+	$(INSTALL_DIR) $(1)/etc/init.d $(1)/etc/rc.d
+	$(INSTALL_BIN) ./files/etc/init.d/mt6890-apn $(1)/etc/init.d/
+	$(LN) ../init.d/mt6890-apn $(1)/etc/rc.d/S99mt6890-apn
 endef
 
 $(eval $(call BuildPackage,mt6890-mtkmipc))

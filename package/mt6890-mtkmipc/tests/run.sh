@@ -77,18 +77,18 @@ check "dump: sim option" has "$T/out" '"sim"'
 # --- 1. setup, primary PDN ---
 reset
 export MOCK_MIPC_ACT=ok MOCK_MIPC_CID=3
-proto setup wan '{"apn":"apn1.example","plmn":"00101","auto_conf":0,"sim":1,"metric":10}'
+proto setup wan '{"apn":"du","plmn":"42403","auto_conf":0,"sim":1,"metric":10}'
 rc=$?
 check "setup: rc 0" [ "$rc" -eq 0 ]
 check "setup: prints ifname line" has "$T/out" "ifname ccmni3"
 check "setup: prints metric" has "$T/out" "metric 10"
 check "setup: prints dns" has "$T/out" "dns 94.200.200.200 94.200.200.201 2001:db8::53"
 check "setup: radio check argv" has "$MOCK_MIPC_LOG" "--nw_radio_state_get | 0"
-check "setup: check_ia argv" has "$MOCK_MIPC_LOG" "--check_ia | apn1.example | 0 | 3 | 3 |  |  | 0 | 0xfffdffff"
-check "setup: primary deact_apn argv" has "$MOCK_MIPC_LOG" "--data_call_deact_apn | apn1.example"
+check "setup: check_ia argv" has "$MOCK_MIPC_LOG" "--check_ia | du | 0 | 3 | 3 |  |  | 0 | 0xfffdffff"
+check "setup: primary deact_apn argv" has "$MOCK_MIPC_LOG" "--data_call_deact_apn | du"
 act="$(grep -F -- '--data_call_act' "$MOCK_MIPC_LOG")"
 check "setup: data_call_act single JSON arg" \
-	[ "$act" = '--data_call_act | { "apn": "apn1.example", "ip_type": 3, "roaming_type": 3, "auth_type": 0, "username": "", "password": "", "bearer_bitmask": "0xfffdffff", "mtu": 1500, "mode": 1 }' ]
+	[ "$act" = '--data_call_act | { "apn": "du", "ip_type": 3, "roaming_type": 3, "auth_type": 0, "username": "", "password": "", "bearer_bitmask": "0xfffdffff", "mtu": 1500, "mode": 1 }' ]
 check "setup: no apn provisioning when auto_conf=0" hasnt "$MOCK_MIPC_LOG" "--apn_provision_by_sim"
 check "setup: state file" [ -f "$T/state/mtkmipc-wan.state" ]
 check "setup: state cid=3" has "$T/state/mtkmipc-wan.state" "cid=3"
@@ -106,12 +106,12 @@ check "status: state up" has "$T/out" "state up"
 # --- 3. vlan -> pdn alias (second interface, secondary PDN) ---
 reset
 export MOCK_MIPC_CID=5
-proto setup wan2 '{"apn":"apn2.example","iaapn":"ia.apn2.example","vlan":2,"auto_conf":1}'
+proto setup wan2 '{"apn":"uenms","iaapn":"etisalat.ae","vlan":2,"auto_conf":1}'
 check "alias: rc 0" [ $? -eq 0 ]
 check "alias: state pdn=2 from vlan" has "$T/state/mtkmipc-wan2.state" "pdn=2"
 check "alias: secondary skips deact_apn" hasnt "$MOCK_MIPC_LOG" "--data_call_deact_apn"
 check "alias: secondary forces auto_conf=0" hasnt "$MOCK_MIPC_LOG" "--apn_provision_by_sim"
-check "alias: iaapn used for check_ia" has "$MOCK_MIPC_LOG" "--check_ia | ia.apn2.example |"
+check "alias: iaapn used for check_ia" has "$MOCK_MIPC_LOG" "--check_ia | etisalat.ae |"
 check "alias: ifname ccmni5" has "$T/out" "ifname ccmni5"
 reset
 proto setup wan3 '{"apn":"x","vlan":2,"pdn":1}'
@@ -120,7 +120,7 @@ proto teardown wan3 '{}'
 
 # --- 4. teardown releases only the saved CID ---
 reset
-proto teardown wan '{"apn":"apn1.example"}'
+proto teardown wan '{"apn":"du"}'
 check "teardown: rc 0" [ $? -eq 0 ]
 check "teardown: deact argv = saved cid" [ "$(cat "$MOCK_MIPC_LOG")" = "--data_call_deact | 3" ]
 check "teardown: state removed" [ ! -f "$T/state/mtkmipc-wan.state" ]
@@ -138,7 +138,7 @@ check "teardown wan2: deact cid 5" [ "$(cat "$MOCK_MIPC_LOG")" = "--data_call_de
 # --- 5. failure case ---
 reset
 export MOCK_MIPC_ACT=fail
-proto setup wan '{"apn":"apn1.example","auto_conf":0,"retry":2}'
+proto setup wan '{"apn":"du","auto_conf":0,"retry":2}'
 rc=$?
 check "fail: rc != 0" [ "$rc" -ne 0 ]
 check "fail: retried retry=2 times" [ "$(grep -cF -- '--data_call_act' "$MOCK_MIPC_LOG")" -eq 2 ]
@@ -149,26 +149,160 @@ export MOCK_MIPC_ACT=ok
 
 # --- 6. SIM not ready / invalid sim ---
 reset
-MOCK_MIPC_SIM=MIPC_SIM_STATUS_SIM_PIN proto setup wan '{"apn":"apn1.example","auto_conf":0}'
+MOCK_MIPC_SIM=MIPC_SIM_STATUS_SIM_PIN proto setup wan '{"apn":"du","auto_conf":0}'
 check "sim pin: rc != 0" [ $? -ne 0 ]
 check "sim pin: error" has "$MOCK_UBUS_LOG" "SIM_PIN_LOCKED"
 check "sim pin: no data call" hasnt "$MOCK_MIPC_LOG" "--data_call_act"
 reset
-proto setup wan '{"apn":"apn1.example","sim":7}'
+proto setup wan '{"apn":"du","sim":7}'
 check "invalid sim: rc != 0" [ $? -ne 0 ]
 check "invalid sim: no mipc call" [ ! -s "$MOCK_MIPC_LOG" ]
 
 # --- 7. auto APN provisioning fills an empty APN ---
 reset
-MOCK_MIPC_PROV='{"apn":"apn1.example","auth_type":"0","user":"","password":"","protocol":"3","iaapn":"apn1.example","rattype":"0","plmn":"00101"}' \
-	proto setup wan '{"plmn":"00101"}'
+MOCK_MIPC_PROV='{"apn":"du","auth_type":"0","user":"","password":"","protocol":"3","iaapn":"du","rattype":"0","plmn":"42403"}' \
+	proto setup wan '{"plmn":"42403"}'
 check "autoapn: rc 0" [ $? -eq 0 ]
 check "autoapn: provisioning called" has "$MOCK_MIPC_LOG" "--apn_provision_by_sim"
-check "autoapn: apn from SIM db" has "$MOCK_MIPC_LOG" '"apn": "apn1.example"'
+check "autoapn: apn from SIM db" has "$MOCK_MIPC_LOG" '"apn": "du"'
 proto teardown wan '{}'
 
 # --- 8. lock file used ---
 check "flock: lock file created" [ -e "$MTKMIPC_LOCK" ]
+
+# --- 9. apn-wan-setup.sh: boot-time WAN creation guards (issue #2) ---
+APN="$PKG/files/lib/mt6890/apn-wan-setup.sh"
+APNBIN="$T/apnbin"
+APN_NET="$T/apn/network"
+MOCK_UCI_LOG="$T/apn-uci.log"
+MOCK_SERVICE_LOG="$T/apn-service.log"
+MOCK_APN_LOG="$T/apn-logger.log"
+mkdir -p "$APNBIN" "$(dirname "$APN_NET")"
+
+# stubs on a private PATH (proto tests above are unaffected):
+#   uci      -q get <selector> answers from MOCK_UCI_AUTOADAPT/_PROTO/_AUTOCONF
+#             (empty = option unset); `uci batch` records its stdin
+#   service  records "network restart"
+#   hexdump  one canned line, MOCK_HEXDUMP_LINE (field 6 = meta flag)
+#   logger   records every call (tag must be mt6890-apn)
+cat > "$APNBIN/uci" <<'EOF'
+#!/bin/sh
+if [ "${2:-}" = get ]; then
+	if [ "$3" = "system.@system[0].ql_wan_lan_auto_adapt" ]; then
+		[ -n "${MOCK_UCI_AUTOADAPT:-}" ] && echo "$MOCK_UCI_AUTOADAPT"
+	elif [ "$3" = "network.wan.proto" ]; then
+		[ -n "${MOCK_UCI_PROTO:-}" ] && echo "$MOCK_UCI_PROTO"
+	elif [ "$3" = "network.wan.auto_conf" ]; then
+		[ -n "${MOCK_UCI_AUTOCONF:-}" ] && echo "$MOCK_UCI_AUTOCONF"
+	fi
+	exit 0
+fi
+[ "${1:-}" = batch ] && cat >> "${MOCK_UCI_LOG:-/dev/null}"
+exit 0
+EOF
+cat > "$APNBIN/service" <<'EOF'
+#!/bin/sh
+echo "$*" >> "${MOCK_SERVICE_LOG:-/dev/null}"
+exit 0
+EOF
+cat > "$APNBIN/hexdump" <<'EOF'
+#!/bin/sh
+echo "${MOCK_HEXDUMP_LINE:-0000000 0000 0000 0000 0000 0000 0000 0000 0000}"
+exit 0
+EOF
+cat > "$APNBIN/logger" <<'EOF'
+#!/bin/sh
+echo "$*" >> "${MOCK_APN_LOG:-/dev/null}"
+exit 0
+EOF
+chmod +x "$APNBIN/uci" "$APNBIN/service" "$APNBIN/hexdump" "$APNBIN/logger"
+export MOCK_UCI_LOG MOCK_SERVICE_LOG MOCK_APN_LOG
+export MOCK_UCI_AUTOADAPT= MOCK_UCI_PROTO= MOCK_UCI_AUTOCONF= MOCK_HEXDUMP_LINE=
+
+apn_reset() {
+	: > "$MOCK_UCI_LOG"; : > "$MOCK_SERVICE_LOG"; : > "$MOCK_APN_LOG"
+	printf 'config interface "loopback"\n' > "$APN_NET"
+	export MOCK_UCI_AUTOADAPT= MOCK_UCI_PROTO= MOCK_UCI_AUTOCONF= MOCK_HEXDUMP_LINE=
+}
+apn_run() { # apn_run [dt_node] (default: node does not exist)
+	( PATH="$APNBIN:$PATH" \
+	  MTKMIPC_NETWORK_CFG="$APN_NET" \
+	  MTKMIPC_DT_BOOT="${1:-$T/apn/no-such-dt-node}" \
+	  sh "$APN" ) > "$T/apn-out" 2> "$T/apn-err"
+}
+
+# meta boot mode: atag,boot hexdump field 6 == 0001 -> skip (guard 1)
+apn_reset
+export MOCK_HEXDUMP_LINE="0000000 0000 0000 0000 0000 0001"
+apn_run "$APN_NET"
+rc=$?
+check "apn meta: rc 0" [ "$rc" -eq 0 ]
+check "apn meta: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
+check "apn meta: no network restart" [ ! -s "$MOCK_SERVICE_LOG" ]
+check "apn meta: logged skip" has "$MOCK_APN_LOG" "mt6890-apn"
+
+# /etc/config/network empty -> skip (guard 2)
+apn_reset
+: > "$APN_NET"
+apn_run
+rc=$?
+check "apn empty cfg: rc 0" [ "$rc" -eq 0 ]
+check "apn empty cfg: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
+check "apn empty cfg: logged skip" has "$MOCK_APN_LOG" "mt6890-apn"
+
+# stock ql_wan_lan_auto_adapt=1 -> skip (guard 3)
+apn_reset
+export MOCK_UCI_AUTOADAPT=1
+apn_run
+rc=$?
+check "apn autoadapt: rc 0" [ "$rc" -eq 0 ]
+check "apn autoadapt: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
+check "apn autoadapt: no network restart" [ ! -s "$MOCK_SERVICE_LOG" ]
+check "apn autoadapt: logged skip" has "$MOCK_APN_LOG" "mt6890-apn"
+
+# WAN proto already mipc/ql_mipc/mtkmipc -> skip (guard 4)
+for p in mtkmipc ql_mipc mipc; do
+	apn_reset
+	export MOCK_UCI_PROTO="$p"
+	apn_run
+	rc=$?
+	check "apn proto=$p: rc 0" [ "$rc" -eq 0 ]
+	check "apn proto=$p: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
+	check "apn proto=$p: no network restart" [ ! -s "$MOCK_SERVICE_LOG" ]
+done
+
+# auto_conf=0 -> skip (guard 5)
+apn_reset
+export MOCK_UCI_AUTOCONF=0
+apn_run
+rc=$?
+check "apn auto_conf=0: rc 0" [ "$rc" -eq 0 ]
+check "apn auto_conf=0: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
+check "apn auto_conf=0: logged skip" has "$MOCK_APN_LOG" "mt6890-apn"
+
+# fresh config (auto_conf unset = default 1), DT node present, not meta:
+# minimal batch + service network restart
+apn_reset
+apn_run "$APN_NET"
+rc=$?
+check "apn fresh: rc 0" [ "$rc" -eq 0 ]
+check "apn fresh: batch sets proto" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
+check "apn fresh: batch sets ifname" has "$MOCK_UCI_LOG" "set network.wan.ifname='ccmni'"
+check "apn fresh: batch sets wan6 ifname" has "$MOCK_UCI_LOG" "set network.wan6.ifname='ccmni'"
+check "apn fresh: batch commits" has "$MOCK_UCI_LOG" "commit network"
+check "apn fresh: batch is exactly 4 lines" [ "$(grep -c . "$MOCK_UCI_LOG")" -eq 4 ]
+check "apn fresh: no apn/auth fields cached" hasnt "$MOCK_UCI_LOG" "network.wan.apn"
+check "apn fresh: service network restart" [ "$(cat "$MOCK_SERVICE_LOG")" = "network restart" ]
+check "apn fresh: logged success" has "$MOCK_APN_LOG" "mt6890-apn"
+check "apn fresh: no stderr noise" [ ! -s "$T/apn-err" ]
+
+# non-MIPC proto: stock semantics replace it (only mipc protos are kept)
+apn_reset
+export MOCK_UCI_PROTO=dhcp
+apn_run
+rc=$?
+check "apn proto=dhcp: rc 0" [ "$rc" -eq 0 ]
+check "apn proto=dhcp: uci batch written" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
 
 echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

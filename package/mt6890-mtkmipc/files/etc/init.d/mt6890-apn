@@ -1,0 +1,21 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# One-shot, boot-only job (issue #2, final piece): create the mtkmipc
+# WAN interface so netifd calls the proto handler. All logic lives in
+# /lib/mt6890/apn-wan-setup.sh. S99 = stock mipc_wan.init timing, after
+# the S01 modem daemons (mt6890-modem) and their radio_on step. Plain
+# rc.common on purpose (no USE_PROCD): no instances, no respawn, no
+# retry — re-run `/etc/init.d/mt6890-apn start` manually if the modem
+# stack was not up when this ran at boot.
+
+START=99
+DESCRIPTION="one-shot: create the mtkmipc WAN interface (APN from SIM)"
+
+start() {
+	/bin/sh /lib/mt6890/apn-wan-setup.sh
+}
+
+stop() {
+	:
+}
