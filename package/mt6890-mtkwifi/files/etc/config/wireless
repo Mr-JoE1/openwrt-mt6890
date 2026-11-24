@@ -1,39 +1,24 @@
-# mt6890-mtkwifi defaults: stock mt_wifi.ko MT7915 DBDC via netifd handler
-# "mtwifi" (/lib/netifd/wireless/mtwifi.sh). Radio names = stock main
-# ifnames (evidence/uci-full.txt: wifi-iface device 'ra0' / 'rai0').
-# Channels 6 / 36 = stock templates mt7915.1.dat / mt7915.2.dat.
-# Radios ship DISABLED: the key below is a placeholder - set your own key,
-# then: uci set wireless.ra0.disabled=0; uci set wireless.rai0.disabled=0;
-#       uci commit wireless; wifi reload   (or: ubus call network reload)
-
-config wifi-device 'ra0'
+# mt6890-mtkwifi defaults (issue #1): the MT7915 DBDC is driven by the
+# vendor Lua wifi stack (X28-lineage /sbin/wifi, package vendor-mtwifi-fw);
+# /etc/init.d/mt6890-wifi brings both bands up at boot (`wifi up`).
+#
+# These wifi-device sections register the two radios with netifd so the
+# LuCI Wireless page can manage them through the "mtwifi" driver
+# (/lib/netifd/wireless/mtwifi.sh): creating/editing an AP there maps onto
+# the per-band .dat profiles via the stock `datconf` and re-bounces the
+# band with the stock `/sbin/wifi down|up`. No interfaces are defined by
+# default, so until you create one in LuCI the boot behaviour stays exactly
+# the stock vendor path (open APs, SSIDs from the .dat profiles).
+#
+# The image ships no WPA key (open APs). To set one outside LuCI:
+#   datconf -f /etc/wireless/mediatek/mt7915.dbdc.b0.dat set AuthMode WPA2PSK
+#   datconf -f /etc/wireless/mediatek/mt7915.dbdc.b0.dat set WPAPSK1 '<key>'
+#   (repeat for mt7915.dbdc.b1.dat)
+#   wifi reload
+config wifi-device 'wifidev0'
 	option type 'mtwifi'
 	option main_ifname 'ra0'
-	option band '2g'
-	option channel '6'
-	option htmode 'HT40'
-	option disabled '1'
 
-config wifi-iface 'default_ra0'
-	option device 'ra0'
-	option network 'lan'
-	option mode 'ap'
-	option ssid 'DWR-2000M'
-	option encryption 'psk2'
-	option key 'CHANGE-ME-wpa2psk'
-
-config wifi-device 'rai0'
+config wifi-device 'wifidev1'
 	option type 'mtwifi'
 	option main_ifname 'rai0'
-	option band '5g'
-	option channel '36'
-	option htmode 'VHT80'
-	option disabled '1'
-
-config wifi-iface 'default_rai0'
-	option device 'rai0'
-	option network 'lan'
-	option mode 'ap'
-	option ssid 'DWR-2000M-5G'
-	option encryption 'psk2'
-	option key 'CHANGE-ME-wpa2psk'

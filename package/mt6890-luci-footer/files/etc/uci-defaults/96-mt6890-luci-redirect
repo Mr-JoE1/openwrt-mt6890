@@ -1,0 +1,6 @@
+#!/bin/sh
+# Serve LuCI at "/": uhttpd ships a default welcome page otherwise.
+# uci add_list is idempotent for an exact-match value, so re-runs are no-ops.
+uci add_list uhttpd.main.redirect="/ /cgi-bin/luci/ uhttpd redirect_to_luci"
+uci commit uhttpd
+service uhttpd restart >/dev/null 2>&1 || true

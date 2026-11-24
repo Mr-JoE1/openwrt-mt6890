@@ -34,7 +34,7 @@ define Package/mt6890-sysupgrade/description
   boot record last. mt6890-bootctl: status / set <a|b> / rollback /
   bootok / confirm / arm. Ships /etc/mt6890-armed: the boot-time tries
   reset stays suppressed until 'mt6890-bootctl confirm'.
-  uci-defaults migration of stock ql_mipc/stoneoim config.
+  uci-defaults migration of stock ql_mipc and vendor wireless config.
 endef
 
 define Build/Compile

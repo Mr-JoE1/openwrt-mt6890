@@ -72,7 +72,7 @@ define Device/dlink_dwr-2000m-a3
 	mt6890-sysupgrade-tar
   DEVICE_PACKAGES := vendor-kernel-4.19.205 vendor-mtwifi-fw \
 	vendor-modem-stack vendor-compat-libs alsa-lib mt6890-mtkmipc \
-	mt6890-mtkwifi mt6890-sysupgrade
+	mt6890-mtkwifi mt6890-sysupgrade uhttpd luci mt6890-luci-footer
 endef
 TARGET_DEVICES += dlink_dwr-2000m-a3
 

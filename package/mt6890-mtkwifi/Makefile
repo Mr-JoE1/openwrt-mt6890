@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# netifd wireless handler "mtwifi" for the stock mt_wifi.ko (MT7915 DBDC).
-# Open half: no vendor bytes. Drives the stock X28-lineage Lua stack
-# (/sbin/wifi + mtkwifi.lua + lib/wifi/mt7615e.lua) shipped, locally, by
-# vendor-mtwifi-fw. PORTING-ANALYSIS.md §3.3 Wi-Fi row, §4 row 7.
+# Wi-Fi glue for the stock mt_wifi.ko (MT7915 DBDC). Open half: no vendor
+# bytes. The active path is the stock X28-lineage Lua stack (/sbin/wifi +
+# mtkwifi.lua + lib/wifi/mt7615e.lua) shipped, locally, by vendor-mtwifi-fw;
+# radios are brought up at boot by /etc/init.d/mt6890-wifi (`wifi up`) and
+# configured via the .dat profiles. The netifd handler "mtwifi" below is
+# installed but is not the active path (netifd `wifi` cannot drive it).
+# PORTING-ANALYSIS.md §3.3 Wi-Fi row, §4 row 7.
 
 include $(TOPDIR)/rules.mk
 

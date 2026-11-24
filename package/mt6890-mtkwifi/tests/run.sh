@@ -221,10 +221,10 @@ mkdir -p "$T/sys/ra0"
 
 # ---- shipped default UCI
 U="$PKG/files/etc/config/wireless"
-check "uci: ra0 + rai0 devices type mtwifi" [ "$(grep -c "option type 'mtwifi'" "$U")" -eq 2 ]
-check "uci: ssid DWR-2000M"    has "$U" "option ssid 'DWR-2000M'"
-check "uci: ssid DWR-2000M-5G" has "$U" "option ssid 'DWR-2000M-5G'"
-check "uci: psk2 x2" [ "$(grep -c "option encryption 'psk2'" "$U")" -eq 2 ]
+check "uci: two device sections type mtwifi" [ "$(grep -c "option type 'mtwifi'" "$U")" -eq 2 ]
+check "uci: ra0 main_ifname"  has "$U" "option main_ifname 'ra0'"
+check "uci: rai0 main_ifname" has "$U" "option main_ifname 'rai0'"
+check "uci: no key in image"  hasnt "$U" "option key"
 
 echo "---"
 echo "RESULT: $PASS passed, $FAIL failed (shell: $DRV_SHELL)"
