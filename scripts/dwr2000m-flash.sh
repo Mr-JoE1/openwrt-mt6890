@@ -52,6 +52,24 @@
 
 set -u
 
+# --- presentation: ANSI colour only on a terminal ----------------------------
+# C_* colour stdout, E_* colour stderr (log/die); each is the escape or "".
+_esc="$(printf '\033')"
+if [ -t 1 ]; then
+	C_BOLD="$_esc[1m"; C_RED="$_esc[31m"; C_GREEN="$_esc[32m"; C_YELLOW="$_esc[33m"
+	C_BLUE="$_esc[34m"; C_MAGENTA="$_esc[35m"; C_CYAN="$_esc[36m"; C_DIM="$_esc[2m"
+	C_RST="$_esc[0m"
+else
+	C_BOLD=""; C_RED=""; C_GREEN=""; C_YELLOW=""
+	C_BLUE=""; C_MAGENTA=""; C_CYAN=""; C_DIM=""
+	C_RST=""
+fi
+if [ -t 2 ]; then
+	E_RED="$_esc[31m"; E_YELLOW="$_esc[33m"; E_RST="$_esc[0m"
+else
+	E_RED=""; E_YELLOW=""; E_RST=""
+fi
+
 MT6890_PROC_MTD="${MT6890_PROC_MTD:-/proc/mtd}"
 MT6890_CMDLINE="${MT6890_CMDLINE:-/proc/cmdline}"
 MT6890_DEVDIR="${MT6890_DEVDIR:-/dev}"
@@ -88,10 +106,36 @@ ADEV=""              # /dev/mtdN of rootfs_a
 BDEV=""              # /dev/mtdN of rootfs_b
 BK=""                # backup dir
 SHA_A=""; SHA_B=""   # PHASE 1 on-device sha256 of the full partitions
+BB_SUM=""; BB_MARK=""     # bad-block gate outcome (summary only)
+UBI_SUM=""; UBI_MARK=""   # UBI-attach gate outcome (summary only)
 
+# say: plain line; also used for data inside $(...) and files - never decorate
 say() { printf '%s\n' "$*"; }
-log() { printf '%s: %s\n' "$PROG" "$*" >&2; }
-die() { printf '%s: ABORT: %s\n' "$PROG" "$*" >&2; exit 1; }
+log() { printf '       %s: %s\n' "$PROG" "$*" >&2; }   # stderr continuation line
+lwarn() { printf '%s[warn]%s %s: %s\n' "$E_YELLOW" "$E_RST" "$PROG" "$*" >&2; }
+lfail() { printf '%s[FAIL]%s %s: %s\n' "$E_RED" "$E_RST" "$PROG" "$*" >&2; }
+die() { printf '%s[FAIL]%s %s: ABORT: %s\n' "$E_RED" "$E_RST" "$PROG" "$*" >&2; exit 1; }
+ok() { printf '%s[ ok ]%s %s\n' "$C_GREEN" "$C_RST" "$*"; }
+wrn() { printf '%s[warn]%s %s\n' "$C_YELLOW" "$C_RST" "$*"; }
+kv() { printf '    %-24s %s\n' "$1" "$2"; }   # aligned key / value detail line
+detail() { printf '    %s\n' "$*"; }
+dashes() { # <n>
+	_dsh=""; _dsh_i=0
+	while [ "$_dsh_i" -lt "$1" ]; do _dsh="$_dsh-"; _dsh_i=$((_dsh_i + 1)); done
+	printf '%s' "$_dsh"
+}
+hdr() { # <colour> <title>: bold coloured phase header + rule line
+	printf '\n%s%s%s%s\n%s%s%s\n' "$C_BOLD" "$1" "$2" "$C_RST" "$1" "$(dashes 72)" "$C_RST"
+}
+subhdr() { printf '%s%s%s\n' "$C_BOLD" "$*" "$C_RST"; }
+# boxed summary: 100 columns wide
+box_rule() { printf '%s+%s+%s\n' "$C_BOLD" "$(dashes 98)" "$C_RST"; }
+box_line() { printf '%s|%s %-96s %s|%s\n' "$C_BOLD" "$C_RST" "$1" "$C_BOLD" "$C_RST"; }
+box_title() { printf '%s| %-96s |%s\n' "$C_BOLD" "$1" "$C_RST"; }
+box_mark() { # <ok|warn> <key> <value>
+	if [ "$1" = ok ]; then _bxm="$C_GREEN[ ok ]$C_RST"; else _bxm="$C_YELLOW[warn]$C_RST"; fi
+	printf '%s|%s %s %-89s %s|%s\n' "$C_BOLD" "$C_RST" "$_bxm" "$(printf '%-24s %s' "$2" "$3")" "$C_BOLD" "$C_RST"
+}
 dryrun() { [ "$MT6890_DRYRUN" = 1 ]; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -130,7 +174,7 @@ confirm() { # <question>
 }
 
 run() { # mtd/flash_erase/nandwrite/wget/tar wrapper honouring MT6890_DRYRUN
-	if dryrun; then say "DRYRUN: $*"; return 0; fi
+	if dryrun; then printf '%sDRYRUN: %s%s\n' "$C_DIM" "$*" "$C_RST"; return 0; fi
 	"$@"
 }
 
@@ -187,9 +231,9 @@ read_records() { # <dev>
 	for _c in $BC_COPIES; do
 		_r="$(bc_read "$1" "$_c")"
 		if [ "${#_r}" -ne 32 ]; then
-			log "misc copy $_c: short read from $1 ('$_r')"; _rr=1
+			lfail "misc copy $_c: short read from $1 ('$_r')"; _rr=1
 		elif [ "$(say "$_r" | cut -c1-8)" != "$BC_MAGIC" ]; then
-			log "misc copy $_c: bad magic $(say "$_r" | cut -c1-8) (want $BC_MAGIC) - not an A/B record"; _rr=1
+			lfail "misc copy $_c: bad magic $(say "$_r" | cut -c1-8) (want $BC_MAGIC) - not an A/B record"; _rr=1
 		fi
 		RECS="$RECS$_r
 "
@@ -202,18 +246,18 @@ print_records() {
 	_i=0
 	say "$RECS" | while read -r _r; do
 		[ -n "$_r" ] || continue
-		say "  copy $_i @$((BC_STRIDE * _i + BC_OFF)): $(say "$_r" | cut -c1-8) $(say "$_r" | cut -c9-16) | A $(bc_byte "$_r" 8) $(bc_byte "$_r" 9) $(bc_byte "$_r" 10) $(bc_byte "$_r" 11) | B $(bc_byte "$_r" 12) $(bc_byte "$_r" 13) $(bc_byte "$_r" 14) $(bc_byte "$_r" 15)"
+		say "    copy $_i @$((BC_STRIDE * _i + BC_OFF)): $(say "$_r" | cut -c1-8) $(say "$_r" | cut -c9-16) | A $(bc_byte "$_r" 8) $(bc_byte "$_r" 9) $(bc_byte "$_r" 10) $(bc_byte "$_r" 11) | B $(bc_byte "$_r" 12) $(bc_byte "$_r" 13) $(bc_byte "$_r" 14) $(bc_byte "$_r" 15)"
 		_i=$((_i + 1))
 	done
-	say "  (magic +4..7 | prio tries success uptype)"
+	say "    (magic +4..7 | prio tries success uptype)"
 }
 
 decode_record() { # <record32>: full 16 bytes of one copy, decoded
-	say "record copy 0 (16 bytes @$BC_OFF): $1"
-	say "  +0..3  magic    $(say "$1" | cut -c1-8) (want $BC_MAGIC)"
-	say "  +4..7  reserved $(say "$1" | cut -c9-16)"
-	say "  +8..11 slot A   prio=$(bc_byte "$1" 8) tries=$(bc_byte "$1" 9) success=$(bc_byte "$1" 10) uptype=$(bc_byte "$1" 11)"
-	say "  +12..15 slot B  prio=$(bc_byte "$1" 12) tries=$(bc_byte "$1" 13) success=$(bc_byte "$1" 14) uptype=$(bc_byte "$1" 15)"
+	kv "record copy 0" "$1 (16 bytes @$BC_OFF)"
+	kv "  +0..3   magic" "$(say "$1" | cut -c1-8) (want $BC_MAGIC)"
+	kv "  +4..7   reserved" "$(say "$1" | cut -c9-16)"
+	kv "  +8..11  slot A" "prio=$(bc_byte "$1" 8) tries=$(bc_byte "$1" 9) success=$(bc_byte "$1" 10) uptype=$(bc_byte "$1" 11)"
+	kv "  +12..15 slot B" "prio=$(bc_byte "$1" 12) tries=$(bc_byte "$1" 13) success=$(bc_byte "$1" 14) uptype=$(bc_byte "$1" 15)"
 }
 
 records_consistent() {
@@ -225,7 +269,7 @@ slot_active() { # <record32>: higher priority byte wins
 	_pb=$(printf '%d' "0x$(bc_byte "$1" 12)")
 	if [ "$_pa" -gt "$_pb" ]; then say a
 	elif [ "$_pb" -gt "$_pa" ]; then say b
-	else log "SAME A/B PRIORITY ($_pa) in misc record"; return 1
+	else lfail "SAME A/B PRIORITY ($_pa) in misc record"; return 1
 	fi
 }
 
@@ -271,10 +315,10 @@ verify_payload() { # <dev> <payload16>: all copies magic + payload byte-exact
 	for _c in $BC_COPIES; do
 		_got="$(bc_read "$1" "$_c")"
 		if [ "$(say "$_got" | cut -c1-8)" != "$BC_MAGIC" ] || [ "$(say "$_got" | cut -c17-32)" != "$2" ]; then
-			log "misc copy $_c readback MISMATCH: got ${_got:-<empty>} want ${BC_MAGIC}........$2"
+			lfail "misc copy $_c readback MISMATCH: got ${_got:-<empty>} want ${BC_MAGIC}........$2"
 			_vp=1
 		else
-			say "  copy $_c readback OK: $_got"
+			ok "misc copy $_c readback: $_got"
 		fi
 	done
 	return "$_vp"
@@ -286,18 +330,18 @@ write_payload() { # <dev> <payload16>: 8 bytes x4 copies via stock dd-nand, then
 	for _c in $BC_COPIES; do
 		_off=$((BC_SEEK0 + BC_STRIDE * _c))
 		if dryrun; then
-			say "DRYRUN: printf '$_wfmt' | $DDN of=$1 seek=$_off bs=1 count=8"
+			printf '%sDRYRUN: %s%s\n' "$C_DIM" "printf '$_wfmt' | $DDN of=$1 seek=$_off bs=1 count=8" "$C_RST"
 			continue
 		fi
 		# shellcheck disable=SC2059
 		if ! printf "$_wfmt" | "$DDN" of="$1" seek="$_off" bs=1 count=8 >/dev/null 2>&1; then
-			log "dd-nand FAILED on copy $_c (seek $_off) - no further copies written"
+			lfail "dd-nand FAILED on copy $_c (seek $_off) - no further copies written"
 			_wfail=1
 			break
 		fi
-		say "  copy $_c: dd-nand of=$1 seek=$_off bs=1 count=8 rc=0"
+		detail "copy $_c: dd-nand of=$1 seek=$_off bs=1 count=8 rc=0"
 	done
-	if dryrun; then say "DRYRUN: readback skipped"; return 0; fi
+	if dryrun; then printf '%sDRYRUN: readback skipped%s\n' "$C_DIM" "$C_RST"; return 0; fi
 	verify_payload "$1" "$2" || _wfail=1
 	return "$_wfail"
 }
@@ -328,17 +372,17 @@ slot_readback_sha() { # <dev>: sha256 of the first IMG_SIZE bytes of the slot
 select_write_tool() {
 	if have mtd; then
 		WTOOL=mtd
-		say "write primitive: mtd (mtd erase $SLOT_A_MTD; mtd write <img> $SLOT_A_MTD)"
+		kv "write primitive" "mtd (mtd erase $SLOT_A_MTD; mtd write <img> $SLOT_A_MTD)"
 	elif have flash_erase && have nandwrite; then
 		WTOOL=mtd-utils
-		say "write primitive: mtd-utils (flash_erase $ADEV 0 0; nandwrite -p $ADEV <img>) - 'mtd' not on PATH"
+		kv "write primitive" "mtd-utils (flash_erase $ADEV 0 0; nandwrite -p $ADEV <img>) - 'mtd' not on PATH"
 	else
 		die "no write primitive: neither 'mtd' nor 'flash_erase' + 'nandwrite' on PATH (nothing written)"
 	fi
 	if have nanddump; then
-		say "readback: nanddump -q -l $IMG_SIZE $ADEV | sha256sum"
+		kv "readback" "nanddump -q -l $IMG_SIZE $ADEV | sha256sum"
 	else
-		say "readback: dd if=$ADEV bs=262144 count=$IMG_PEBS | sha256sum (nanddump not on PATH)"
+		kv "readback" "dd if=$ADEV bs=262144 count=$IMG_PEBS | sha256sum (nanddump not on PATH)"
 	fi
 }
 
@@ -347,19 +391,22 @@ bad_block_gate() {
 	if [ -r "$_bbf" ]; then
 		_bb="$(cat "$_bbf" 2>/dev/null)"
 		case "$_bb" in
-		0) say "bad_blocks: $SLOT_A_MTD = 0 OK" ;;
+		0) ok "bad-block gate: $SLOT_A_MTD (mtd$SLOT_A_NUM) bad_blocks = 0"
+		   BB_SUM="$SLOT_A_MTD bad_blocks = 0"; BB_MARK=ok ;;
 		*) die "bad_blocks: $SLOT_A_MTD (mtd$SLOT_A_NUM) reports '${_bb:-?}' bad block(s). The 64 MiB image fills the exactly-64 MiB partition completely, so there is no spare eraseblock to skip to: the write would be truncated or shifted. Not flashing (nothing written)." ;;
 		esac
 		_bbb="$MT6890_SYSFS_MTD/mtd$SLOT_B_NUM/bad_blocks"
-		[ -r "$_bbb" ] && say "bad_blocks: $SLOT_B_MTD = $(cat "$_bbb" 2>/dev/null) (info only)"
+		[ -r "$_bbb" ] && kv "bad_blocks $SLOT_B_MTD" "$(cat "$_bbb" 2>/dev/null) (info only)"
 	else
-		say "bad_blocks: unknown (sysfs attr missing) - continuing"
+		wrn "bad-block gate: unknown (sysfs attr missing) - continuing"
+		BB_SUM="unknown (sysfs attr missing)"; BB_MARK=warn
 	fi
 }
 
 ubi_attach_gate() { # slot A must not be attached to any UBI device (read-only)
 	if [ ! -d "$MT6890_SYSFS_UBI" ]; then
-		say "ubi attach map: unknown (sysfs missing) - continuing"
+		wrn "UBI-attach gate: unknown (sysfs missing) - continuing"
+		UBI_SUM="unknown (sysfs missing)"; UBI_MARK=warn
 		return 0
 	fi
 	_map=""
@@ -372,7 +419,9 @@ ubi_attach_gate() { # slot A must not be attached to any UBI device (read-only)
 		fi
 		_map="$_map $_ud: mtd${_um:-?};"
 	done
-	say "ubi attach map:${_map:- (no ubi devices attached)} - $SLOT_A_MTD (mtd$SLOT_A_NUM) not attached OK"
+	_map="${_map# }"; kv "ubi attach map" "${_map:-(no ubi devices attached)}"
+	ok "UBI-attach gate: $SLOT_A_MTD (mtd$SLOT_A_NUM) not attached"
+	UBI_SUM="$SLOT_A_MTD (mtd$SLOT_A_NUM) not attached"; UBI_MARK=ok
 }
 
 # --- fingerprint (diagnostic only) -------------------------------------------
@@ -407,10 +456,10 @@ need_misc() {
 
 need_ddnand() {
 	if DDN="$(ddnand_path)"; then
-		say "dd-nand: $DDN"
+		kv "dd-nand" "$DDN"
 	elif dryrun; then
 		DDN=dd-nand
-		log "WARNING: dd-nand not found (DRYRUN: continuing, a real run refuses)"
+		lwarn "WARNING: dd-nand not found (DRYRUN: continuing, a real run refuses)"
 	else
 		die "dd-nand not found (MT6890_DDNAND, PATH, /usr/sbin, /sbin) - refusing to write misc; there is no substitute"
 	fi
@@ -418,7 +467,7 @@ need_ddnand() {
 
 # --- PHASE 0 (shared by flash and rehearse; read-only) ------------------------
 phase0() { # <flash|rehearse>
-	say "=== PHASE 0: preflight (read-only) ==="
+	hdr "$C_CYAN" "PHASE 0: preflight (read-only)"
 	[ -r "$MT6890_PROC_MTD" ] || die "cannot read $MT6890_PROC_MTD"
 	have sha256sum || die "'sha256sum' not on PATH - v2 depends on it (the stock busybox has it)"
 	_na="$(mtd_num "$SLOT_A_MTD")" || die "no \"$SLOT_A_MTD\" in $MT6890_PROC_MTD"
@@ -429,7 +478,9 @@ phase0() { # <flash|rehearse>
 	ADEV="$MT6890_DEVDIR/mtd$_na"; BDEV="$MT6890_DEVDIR/mtd$_nb"
 	_sa="$(mtd_size "$SLOT_A_MTD")"; _sb="$(mtd_size "$SLOT_B_MTD")"
 	need_misc
-	say "mtd sizes: $SLOT_A_MTD = mtd$_na ${_sa:-?} B, $SLOT_B_MTD = mtd$_nb ${_sb:-?} B, misc = $MISC $(mtd_size misc) B"
+	kv "mtd size $SLOT_A_MTD" "mtd$_na ${_sa:-?} B"
+	kv "mtd size $SLOT_B_MTD" "mtd$_nb ${_sb:-?} B"
+	kv "mtd size misc" "$MISC $(mtd_size misc) B"
 	if [ -z "$_sa" ] || [ "$_sa" -lt "$IMG_SIZE" ]; then
 		die "$SLOT_A_MTD is ${_sa:-?} bytes, image needs $IMG_SIZE"
 	fi
@@ -445,48 +496,48 @@ phase0() { # <flash|rehearse>
 	read_records "$MISC" || die "misc record check failed (all 4 copies must carry magic $BC_MAGIC)"
 	print_records
 	decode_record "$REC0"
-	records_consistent || log "WARNING: the 4 misc copies are not identical (copy 0 is used)"
+	records_consistent || lwarn "WARNING: the 4 misc copies are not identical (copy 0 is used)"
 	_act="$(slot_active "$REC0")" || die "cannot determine the active slot from the misc record"
 	_ubi="$(cmdline_ubi_mtd)" || _ubi=""
 	_boot="$(slot_booted)" || die "cannot resolve the booted slot: ubi.mtd='${_ubi:-<none>}' in $MT6890_CMDLINE is not $SLOT_A_MTD/$SLOT_B_MTD"
 	case "$_ubi" in
-	*[!0-9]*) say "cmdline: ubi.mtd=$_ubi -> slot $_boot" ;;
-	*) say "cmdline: ubi.mtd=$_ubi -> mtd$_ubi \"$(mtd_name "$_ubi")\" -> slot $_boot" ;;
+	*[!0-9]*) kv "cmdline" "ubi.mtd=$_ubi -> slot $_boot" ;;
+	*) kv "cmdline" "ubi.mtd=$_ubi -> mtd$_ubi \"$(mtd_name "$_ubi")\" -> slot $_boot" ;;
 	esac
-	say "active slot (misc priority): $_act"
-	say "booted slot (cmdline ubi.mtd -> /proc/mtd): $_boot"
+	kv "active slot" "$_act (misc priority)"
+	kv "booted slot" "$_boot (cmdline ubi.mtd -> /proc/mtd)"
 	[ "$_boot" = b ] ||
 		die "this script targets the reference layout (stock on B); see Flash-Plan, swap A/B manually"
 	[ "$_act" = b ] ||
 		die "running B but misc already selects A (earlier attempt?) - check '$PROG status', fix with '$PROG revert <backup>'"
 	_bs="$(bc_byte "$REC0" 14)"
 	if [ "$_bs" != 01 ]; then
-		say "WARNING: b_success=$_bs (not 01). The stock boot-done script (zmtk_boot_done) clones slot B over slot A on every stock boot while success != 01:"
-		say "WARNING:  (a) any fallback to stock will overwrite 24.10 in slot A - expected and harmless (B is the source and is not changed);"
-		say "WARNING:  (b) do not power-cycle the unit during the first ~2 min of a stock boot (the clone may be running);"
-		say "WARNING:  (c) the Flash-Plan rollback note \"A keeps the failed image\" does not hold on this unit."
-		say "(this is the normal state on most units - continuing)"
+		wrn "WARNING: b_success=$_bs (not 01). The stock boot-done script (zmtk_boot_done) clones slot B over slot A on every stock boot while success != 01:"
+		detail "(a) any fallback to stock will overwrite 24.10 in slot A - expected and harmless (B is the source and is not changed);"
+		detail "(b) do not power-cycle the unit during the first ~2 min of a stock boot (the clone may be running);"
+		detail "(c) the Flash-Plan rollback note \"A keeps the failed image\" does not hold on this unit."
+		detail "(this is the normal state on most units - continuing)"
 	fi
-	say "PHASE 0 OK: stock runs from B and B is active; target slot A ($SLOT_A_MTD)"
+	ok "PHASE 0 OK: stock runs from B and B is active; target slot A ($SLOT_A_MTD)"
 }
 
 # --- PHASE 1 (shared; writes only to MT6890_TMPDIR) ---------------------------
 phase1() {
 	_tgz="$MT6890_TMPDIR/stock-config-backup.tgz"
 	confirm "Continue to PHASE 1 (backup to $MT6890_TMPDIR + off-device dumps)?" || die "stopped by user before PHASE 1 (nothing written)"
-	say "=== PHASE 1: backup (writes only to $MT6890_TMPDIR) ==="
+	hdr "$C_BLUE" "PHASE 1: backup (writes only to $MT6890_TMPDIR)"
 	BK="$MT6890_TMPDIR/flash-backup-$(date +%s)"
 	[ -e "$BK" ] && BK="$BK-$$"
 	mkdir "$BK" || die "cannot create $BK"
 	_paths=""
 	for _p in $MT6890_BACKUP_PATHS; do
-		if [ -e "$_p" ]; then _paths="$_paths $_p"; else log "WARNING: $_p missing - not in the config backup"; fi
+		if [ -e "$_p" ]; then _paths="$_paths $_p"; else lwarn "WARNING: $_p missing - not in the config backup"; fi
 	done
 	if [ -n "$_paths" ]; then
 		# shellcheck disable=SC2086
-		run tar czf "$_tgz" $_paths || log "WARNING: tar failed (best effort) - $_tgz may be incomplete"
+		run tar czf "$_tgz" $_paths || lwarn "WARNING: tar failed (best effort) - $_tgz may be incomplete"
 	else
-		log "WARNING: nothing to tar"
+		lwarn "WARNING: nothing to tar"
 	fi
 	printf '%s' "$RECS" > "$BK/misc-records.txt"
 	cat "$MT6890_CMDLINE" > "$BK/cmdline.txt"
@@ -498,10 +549,10 @@ phase1() {
 	if [ "$_lines" -ne 4 ] || [ "$_good" -ne 4 ]; then
 		die "backup gate: $BK/misc-records.txt has $_lines lines / $_good valid records (want 4/4)"
 	fi
-	say "backup: $BK"
-	ls -l "$BK"
+	kv "backup" "$BK"
+	ls -l "$BK" | sed 's/^/        /'
 
-	say "--- off-device partition dumps (mandatory) ---"
+	subhdr "--- off-device partition dumps (mandatory) ---"
 	say "on-device sha256 of the full partitions (streamed, nothing stored in $MT6890_TMPDIR):"
 	_shm="$(part_sha "$MISC")"
 	SHA_A="$(part_sha "$ADEV")"
@@ -511,26 +562,26 @@ phase1() {
 		say "$SHA_A  rootfs_a.bin"
 		say "$SHA_B  rootfs_b.bin"
 	} > "$BK/partitions.sha256"
-	sed 's/^/  /' "$BK/partitions.sha256"
+	sed 's/^/    /' "$BK/partitions.sha256"
 	say "Run these FROM THE PC (RAM on the unit is too small to hold 2 x 64 MiB; stream over ssh):"
-	say "  (stock login user is 'admin', uid 0; OpenSSH >= 8.8 needs 'HostKeyAlgorithms +ssh-rsa' for the stock"
-	say "   dropbear host key - see Flash-Plan \"Prerequisites\")"
-	say "  ssh <user>@<router> \"$(dump_cmd "$MISC")\" > misc.bin"
-	say "  ssh <user>@<router> \"$(dump_cmd "$ADEV")\" > rootfs_a.bin"
-	say "  ssh <user>@<router> \"$(dump_cmd "$BDEV")\" > rootfs_b.bin"
-	say "  sha256sum misc.bin rootfs_a.bin rootfs_b.bin"
+	say "    (stock login user is 'admin', uid 0; OpenSSH >= 8.8 needs 'HostKeyAlgorithms +ssh-rsa' for the stock"
+	say "     dropbear host key - see Flash-Plan \"Prerequisites\")"
+	say "    ssh <user>@<router> \"$(dump_cmd "$MISC")\" > misc.bin"
+	say "    ssh <user>@<router> \"$(dump_cmd "$ADEV")\" > rootfs_a.bin"
+	say "    ssh <user>@<router> \"$(dump_cmd "$BDEV")\" > rootfs_b.bin"
+	say "    sha256sum misc.bin rootfs_a.bin rootfs_b.bin"
 	say "nanddump may print \"ECC: N corrected bitflip(s)\" on stderr - corrected, harmless."
 	say "the RUNNING slot (rootfs_b) dumps a different sha256 each time (live UBI) - that is expected; rootfs_a and misc must match the sums above exactly."
 	say "PC-side misc and rootfs_a sums must equal the on-device sums above (also in $BK/partitions.sha256); rootfs_b is informational."
 	say "Also copy the backup dir and config tar to the PC (OpenSSH >= 9 needs -O if the router has no sftp-server):"
-	say "  scp -r <router>:$BK <router>:$_tgz <pc>/"
+	say "    scp -r <router>:$BK <router>:$_tgz <pc>/"
 	if [ "$MT6890_SKIP_DUMP_GATE" = 1 ]; then
-		say "WARNING: dump gate skipped by env"
+		wrn "WARNING: dump gate skipped by env"
 	else
 		confirm "Have you completed the off-device dumps of misc, rootfs_a, rootfs_b and verified the misc + rootfs_a sha256 on the PC?" ||
 			die "dump gate: off-device dumps not confirmed - stopped before PHASE 2 (nothing flashed)"
 	fi
-	say "PHASE 1 OK"
+	ok "PHASE 1 OK"
 }
 
 # PHASE 3.x: save the original payload, write slot A's payload, read back
@@ -539,11 +590,11 @@ switch_record_to_a() {
 	_orig="$(say "$REC0" | cut -c17-32)"
 	printf '%s\n' "$_orig" > "$BK/original-record.hex"
 	[ "$(cat "$BK/original-record.hex")" = "$_orig" ] || die "cannot save $BK/original-record.hex; misc untouched"
-	say "original payload (copy 0) saved: $BK/original-record.hex = $_orig"
+	kv "original payload saved" "$BK/original-record.hex = $_orig (copy 0)"
 	_new="$(payload_slot_a "$REC0")"
-	say "misc $MISC: payload $_orig -> $_new"
+	kv "misc payload" "$MISC: $_orig -> $_new"
 	if ! write_payload "$MISC" "$_new"; then
-		log "RECORD WRITE FAILED - do NOT reboot."
+		lfail "RECORD WRITE FAILED - do NOT reboot."
 		log "restore the original record with:"
 		log "  sh $0 revert $BK/original-record.hex"
 		exit 1
@@ -554,15 +605,16 @@ switch_record_to_a() {
 cmd_flash() { # <url> <sha256>
 	url="$1"; want_sha="$(say "$2" | sed 'y/ABCDEF/abcdef/')"
 	img="$MT6890_TMPDIR/img.bin"
-	dryrun && say "*** MT6890_DRYRUN=1: mtd, flash_erase, nandwrite, dd-nand, tar and wget are printed, not run ***"
+	_got_sha=""; _rb=""   # presentation only: reused by the final summary
+	dryrun && wrn "*** MT6890_DRYRUN=1: mtd, flash_erase, nandwrite, dd-nand, tar and wget are printed, not run ***"
 
 	phase0 flash
 	phase1
 
 	confirm "Continue to PHASE 2 (download the image to $img)?" || die "stopped by user before PHASE 2 (nothing flashed)"
-	say "=== PHASE 2: transfer (writes only to $MT6890_TMPDIR) ==="
+	hdr "$C_MAGENTA" "PHASE 2: transfer (writes only to $MT6890_TMPDIR)"
 	if dryrun; then
-		say "DRYRUN: wget -O $img $url"
+		printf '%sDRYRUN: %s%s\n' "$C_DIM" "wget -O $img $url" "$C_RST"
 	else
 		rm -f "$img"
 		wget -O "$img" "$url" || die "wget failed"
@@ -570,56 +622,56 @@ cmd_flash() { # <url> <sha256>
 	if [ -f "$img" ]; then
 		_isz=$(($(wc -c < "$img")))
 		[ "$_isz" -eq "$IMG_SIZE" ] || die "size gate: $img is $_isz bytes, want exactly $IMG_SIZE (nothing flashed)"
-		say "size gate OK: $_isz"
+		ok "size gate: $_isz bytes"
 		_got_sha="$(sha_file "$img")"
 		[ "$_got_sha" = "$want_sha" ] || die "sha256 gate: got $_got_sha want $want_sha (nothing flashed)"
-		say "sha256 gate OK: $_got_sha"
+		ok "sha256 gate: $_got_sha"
 	elif dryrun; then
-		say "DRYRUN: $img not present - size/sha256 gates skipped"
+		wrn "DRYRUN: $img not present - size/sha256 gates skipped"
 	else
 		die "$img missing after wget"
 	fi
-	say "PHASE 2 OK"
+	ok "PHASE 2 OK"
 
 	confirm "PHASE 3 ERASES and WRITES $SLOT_A_MTD (mtd$SLOT_A_NUM), verifies it, then switches misc to slot A. Proceed?" ||
 		die "stopped by user before PHASE 3 (nothing flashed)"
-	say "=== PHASE 3: flash slot A ==="
+	hdr "$C_YELLOW" "PHASE 3: flash slot A"
 	[ "$(slot_booted)" = b ] || die "booted slot is no longer B - refusing to touch $SLOT_A_MTD"
 	if [ "$WTOOL" = mtd ]; then
-		say "[3.1] mtd erase $SLOT_A_MTD"
+		subhdr "[3.1] mtd erase $SLOT_A_MTD"
 		run mtd erase "$SLOT_A_MTD"; _rc=$?
 	else
-		say "[3.1] flash_erase $ADEV 0 0"
+		subhdr "[3.1] flash_erase $ADEV 0 0"
 		run flash_erase "$ADEV" 0 0; _rc=$?
 	fi
 	[ "$_rc" -eq 0 ] || die "erase of $SLOT_A_MTD failed (rc $_rc); misc untouched - the unit still boots B"
 	if [ "$WTOOL" = mtd ]; then
-		say "[3.2] mtd write $img $SLOT_A_MTD - 64 MiB, this takes a few minutes ..."
+		subhdr "[3.2] mtd write $img $SLOT_A_MTD - 64 MiB, this takes a few minutes ..."
 		run mtd write "$img" "$SLOT_A_MTD"; _rc=$?
 	else
-		say "[3.2] nandwrite -p $ADEV $img - 64 MiB, this takes a few minutes ..."
+		subhdr "[3.2] nandwrite -p $ADEV $img - 64 MiB, this takes a few minutes ..."
 		run nandwrite -p "$ADEV" "$img"; _rc=$?
 	fi
 	[ "$_rc" -eq 0 ] || die "write of $SLOT_A_MTD failed (rc $_rc); misc untouched - the unit still boots B"
-	say "[3.3] readback gate: sha256 of $SLOT_A_MTD vs image"
+	subhdr "[3.3] readback gate: sha256 of $SLOT_A_MTD vs image"
 	if dryrun; then
-		say "DRYRUN: readback gate skipped (nothing was written)"
+		wrn "DRYRUN: readback gate skipped (nothing was written)"
 	else
 		_rb="$(slot_readback_sha "$ADEV")"
 		if [ "$_rb" != "$want_sha" ]; then
-			log "readback gate: $SLOT_A_MTD sha256 $_rb != image $want_sha"
+			lfail "readback gate: $SLOT_A_MTD sha256 $_rb != image $want_sha"
 			log "slot A now holds a bad image. That is harmless: the misc record was NOT touched and still selects B,"
 			log "so the unit keeps booting stock B. Retry from PHASE 0: sh $0 flash $url $want_sha"
 			die "readback gate failed - misc untouched"
 		fi
-		say "readback gate OK: $_rb"
+		ok "readback gate: $_rb"
 	fi
-	say "[3.4] misc record -> slot A"
+	subhdr "[3.4] misc record -> slot A"
 	switch_record_to_a
-	if dryrun; then say "PHASE 3 (DRYRUN): nothing was written"
-	else say "PHASE 3 OK: $SLOT_A_MTD written + verified, all 4 misc copies select slot A"; fi
+	if dryrun; then wrn "PHASE 3 (DRYRUN): nothing was written"
+	else ok "PHASE 3 OK: $SLOT_A_MTD written + verified, all 4 misc copies select slot A"; fi
 
-	say "=== PHASE 4: done (nothing more is written) ==="
+	hdr "$C_GREEN" "PHASE 4: done (nothing more is written)"
 	cat <<EOF
 After the reboot (wait ~90 s), on 24.10 check (Flash-Plan 5):
   grep -o 'ubi.mtd=[^ ]*' /proc/cmdline   -> ubi.mtd=29
@@ -648,40 +700,75 @@ Copy the backup off the unit first (/tmp does not survive a reboot):
 EOF
 	say "run \`reboot\` yourself when ready. If the unit fails to boot, the preloader falls back to stock B after the tries; \`$PROG revert /tmp/flash-backup-*/misc-records.txt\` from stock fixes a stuck record."
 	say "(this run: $PROG revert $BK/misc-records.txt)"
+	flash_summary
+}
+
+# --- final summary of a successful flash (reuses the values computed above) ---
+flash_summary() {
+	say ""
+	box_rule
+	if dryrun; then box_title "DRYRUN COMPLETE - nothing was written, nothing verified on flash"
+	else box_title "FLASH COMPLETE - slot A ($SLOT_A_MTD) written + verified, misc selects slot A"; fi
+	box_rule
+	box_line "Verified:"
+	if [ -n "$_got_sha" ]; then box_mark ok "image sha256" "$_got_sha"
+	else box_mark warn "image sha256" "skipped (DRYRUN: $img not present)"; fi
+	if [ -n "$_rb" ]; then box_mark ok "slot A readback sha256" "$_rb"
+	else box_mark warn "slot A readback sha256" "skipped (DRYRUN)"; fi
+	if dryrun; then box_mark warn "misc record copies 0..3" "readback skipped (DRYRUN); planned payload $_new"
+	else box_mark ok "misc record copies 0..3" "all 4 read back: magic $BC_MAGIC + payload $_new"; fi
+	box_mark "$BB_MARK" "bad-block gate" "$BB_SUM"
+	box_mark "$UBI_MARK" "UBI-attach gate" "$UBI_SUM"
+	box_line ""
+	box_line "Backup (on the unit, in $MT6890_TMPDIR - lost on reboot, copy it to the PC first):"
+	box_line "$(printf '%-31s %s' "  backup dir" "$BK")"
+	box_line "$(printf '%-31s %s' "  partition sha256 sums" "$BK/partitions.sha256")"
+	box_line "$(printf '%-31s %s' "  config tar" "$MT6890_TMPDIR/stock-config-backup.tgz")"
+	box_line "$(printf '%-31s %s' "  off-device dumps (on the PC)" "misc.bin rootfs_a.bin rootfs_b.bin (PHASE 1)")"
+	box_line "  copy off before the reboot:"
+	box_line "    scp -r <router>:$BK <router>:$MT6890_TMPDIR/stock-config-backup.tgz <pc>/"
+	box_line ""
+	box_line "Next:"
+	box_line "  1. reboot                    (run it yourself when ready; boot takes ~90 s)"
+	box_line "  2. ssh root@<router>         (reconnect; 24.10 now runs from slot A)"
+	box_line "  3. mt6890-bootctl confirm    (after the Flash-Plan 5 checks pass; -> armed=no)"
+	box_line "  if the record is stuck, from stock:"
+	box_line "    $PROG revert $BK/misc-records.txt"
+	box_rule
 }
 
 # --- rehearse ---------------------------------------------------------------
 cmd_rehearse() {
-	dryrun && say "*** MT6890_DRYRUN=1: dd-nand and tar are printed, not run ***"
+	dryrun && wrn "*** MT6890_DRYRUN=1: dd-nand and tar are printed, not run ***"
 	phase0 rehearse
 	phase1
 	if [ "$SHA_A" != "$SHA_B" ]; then
-		say "NOTE: rootfs_a sha256 ($SHA_A) != rootfs_b sha256 ($SHA_B): slot A is NOT a byte clone of B."
-		say "NOTE: the rehearsal is only meaningful when slot A holds a bootable stock image; this script cannot verify that itself."
+		wrn "NOTE: rootfs_a sha256 ($SHA_A) != rootfs_b sha256 ($SHA_B): slot A is NOT a byte clone of B."
+		detail "NOTE: the rehearsal is only meaningful when slot A holds a bootable stock image; this script cannot verify that itself."
 		confirm "Does slot A hold a bootable stock image (e.g. an earlier stock clone of B)?" ||
 			die "rehearsal not confirmed (nothing written)"
 	else
-		say "rootfs_a and rootfs_b are byte-identical (sha256 $SHA_A)"
+		ok "rootfs_a and rootfs_b are byte-identical (sha256 $SHA_A)"
 	fi
-	say "NOTE: when stock boots from A with success_a != 01, its boot-done script clones A over B (the mirror of the PHASE 0 warning). With A a stock copy this is expected; keep the rootfs_b dump."
+	wrn "NOTE: when stock boots from A with success_a != 01, its boot-done script clones A over B (the mirror of the PHASE 0 warning). With A a stock copy this is expected; keep the rootfs_b dump."
 	confirm "Rehearsal: write ONLY the misc record (slot A: prio 0f, tries 03, success 00; no rootfs write). Proceed?" ||
 		die "stopped by user before the record write (nothing written)"
-	say "=== REHEARSAL: misc record -> slot A (rootfs untouched) ==="
+	hdr "$C_YELLOW" "REHEARSAL: misc record -> slot A (rootfs untouched)"
 	[ "$(slot_booted)" = b ] || die "booted slot is no longer B - refusing"
 	switch_record_to_a
-	if dryrun; then say "REHEARSAL (DRYRUN): nothing was written"; return 0; fi
-	say "rehearsal armed: reboot now. Expected: the unit boots from A (stock copy). After it is up, run '$PROG status' — booted=a proves the record semantics and that LK accepts prio 0f/tries 03. Then run '$PROG revert $BK/original-record.hex' and reboot to return to B."
+	if dryrun; then wrn "REHEARSAL (DRYRUN): nothing was written"; return 0; fi
+	ok "rehearsal armed: reboot now. Expected: the unit boots from A (stock copy). After it is up, run '$PROG status' — booted=a proves the record semantics and that LK accepts prio 0f/tries 03. Then run '$PROG revert $BK/original-record.hex' and reboot to return to B."
 	say "(copy $BK off the unit before rebooting: /tmp does not survive a reboot)"
 }
 
 # --- status -----------------------------------------------------------------
 cmd_status() {
 	need_misc
-	say "misc: $MISC"
+	kv "misc" "$MISC"
 	_ok=0
 	read_records "$MISC" || _ok=1
 	print_records
-	if records_consistent; then say "copies_consistent=yes"; else say "copies_consistent=no"; fi
+	if records_consistent; then ok "copies_consistent=yes"; else wrn "copies_consistent=no"; fi
 	_act="$(slot_active "$REC0")" || _act="?"
 	_boot="$(slot_booted)" || _boot="?"
 	say "active=$_act booted=$_boot"
@@ -700,28 +787,28 @@ cmd_revert() { # <backup-file>
 	elif [ "$_n" -eq 4 ] && [ "$(say "$_data" | awk 'length($0) == 32 && substr($0, 1, 8) == "'"$BC_MAGIC"'" { n++ } END { print n + 0 }')" -eq 4 ]; then
 		_pl="$(say "$_data" | head -n1 | cut -c17-32)"
 		[ "$(say "$_data" | cut -c17-32 | sort -u | wc -l)" -eq 1 ] ||
-			log "WARNING: payloads differ between the 4 backed-up copies - restoring copy 0's to all"
+			lwarn "WARNING: payloads differ between the 4 backed-up copies - restoring copy 0's to all"
 	else
 		die "$1: want 4 lines of 32 hex chars (misc-records.txt) or 1 line of 16 hex chars (original-record.hex)"
 	fi
 	need_misc
 	need_ddnand
 	read_records "$MISC" || die "current misc record check failed (magic) - refusing to write"
-	say "misc: $MISC"
+	kv "misc" "$MISC"
 	print_records
-	say "target payload (+8..+15): $_pl"
+	kv "target payload +8..+15" "$_pl"
 	_same=1
 	for _c in $BC_COPIES; do
 		[ "$(bc_read "$MISC" "$_c" | cut -c17-32)" = "$_pl" ] || _same=0
 	done
-	if [ "$_same" -eq 1 ]; then say "all 4 copies already hold $_pl - nothing to write"; return 0; fi
+	if [ "$_same" -eq 1 ]; then ok "all 4 copies already hold $_pl - nothing to write"; return 0; fi
 	confirm "Write $_pl to all 4 misc copies?" || die "stopped by user (nothing written)"
 	if ! write_payload "$MISC" "$_pl"; then
-		log "REVERT FAILED - do NOT reboot; retry: sh $0 revert $1"
+		lfail "REVERT FAILED - do NOT reboot; retry: sh $0 revert $1"
 		exit 1
 	fi
 	dryrun && return 0
-	say "revert OK: all 4 copies restored ($_pl), active slot now $(slot_active "$(bc_read "$MISC" 0)")"
+	ok "revert OK: all 4 copies restored ($_pl), active slot now $(slot_active "$(bc_read "$MISC" 0)")"
 }
 
 case "${1:-}" in
