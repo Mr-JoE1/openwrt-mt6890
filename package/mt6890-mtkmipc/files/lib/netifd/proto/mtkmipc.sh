@@ -53,11 +53,32 @@ mtkmipc_log() {
 	return 0
 }
 
+MTKMIPC_CLI_TIMEOUT="${MTKMIPC_CLI_TIMEOUT:-10}"
+
+# mipc_wan_cli has no timeout and blocks forever when the MIPC server is
+# down (dead MD); cap every call so callers can react. POSIX sh (busybox).
+mtkmipc_cli() {
+	mipc_wan_cli "$@" &
+	local cli_pid=$! i=0
+	while kill -0 "$cli_pid" 2>/dev/null; do
+		i=$((i + 1))
+		if [ "$i" -ge "$MTKMIPC_CLI_TIMEOUT" ]; then
+			kill "$cli_pid" 2>/dev/null
+			wait "$cli_pid" 2>/dev/null
+			mtkmipc_log "mipc_wan_cli $* timed out after ${MTKMIPC_CLI_TIMEOUT}s"
+			return 124
+		fi
+		sleep 1
+	done
+	wait "$cli_pid" 2>/dev/null
+	return $?
+}
+
 # Run mipc_wan_cli serialised on $MTKMIPC_LOCK (one modem call at a time).
 mtkmipc_cli_locked() {
 	(
 		flock -w 120 9 || { mtkmipc_log "lock $MTKMIPC_LOCK timeout"; exit 1; }
-		mipc_wan_cli "$@"
+		mtkmipc_cli "$@"
 	) 9>"$MTKMIPC_LOCK"
 }
 

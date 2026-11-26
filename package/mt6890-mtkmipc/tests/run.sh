@@ -304,5 +304,18 @@ rc=$?
 check "apn proto=dhcp: rc 0" [ "$rc" -eq 0 ]
 check "apn proto=dhcp: uci batch written" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
 
+# --- 10. hanging mipc_wan_cli (MIPC server down): watchdog (v3.1 C) ---
+# Separate script (own scratch root, bounded by host `timeout`); its
+# per-check results are folded into this suite's totals.
+PROTO_SHELL="$PROTO_SHELL" OPENWRT_TOP="$TOP" sh "$HERE/hang-cli.sh" > "$T/hang.out" 2>&1
+grep -E '^\[(PASS|FAIL)\] ' "$T/hang.out"
+hp="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\1/p' "$T/hang.out")"
+hf="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\2/p' "$T/hang.out")"
+if [ -n "$hp" ] && [ -n "$hf" ]; then
+	PASS=$((PASS + hp)); FAIL=$((FAIL + hf))
+else
+	bad "hang-cli.sh: no RESULT line"; cat "$T/hang.out"
+fi
+
 echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

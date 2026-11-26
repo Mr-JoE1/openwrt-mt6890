@@ -25,6 +25,27 @@ log() {
 	logger -t mt6890-apn "$*"
 }
 
+MTKMIPC_CLI_TIMEOUT="${MTKMIPC_CLI_TIMEOUT:-10}"
+
+# mipc_wan_cli has no timeout and blocks forever when the MIPC server is
+# down (dead MD); cap every call so callers can react. POSIX sh (busybox).
+mipc_wd() {
+	mipc_wan_cli "$@" &
+	local cli_pid=$! i=0
+	while kill -0 "$cli_pid" 2>/dev/null; do
+		i=$((i + 1))
+		if [ "$i" -ge "$MTKMIPC_CLI_TIMEOUT" ]; then
+			kill "$cli_pid" 2>/dev/null
+			wait "$cli_pid" 2>/dev/null
+			logger -t mtkmipc-wd "mipc_wan_cli $* timed out after ${MTKMIPC_CLI_TIMEOUT}s"
+			return 124
+		fi
+		sleep 1
+	done
+	wait "$cli_pid" 2>/dev/null
+	return $?
+}
+
 # guard: meta/factory boot mode (stock: atag,boot hexdump field 6 = 0001)
 if [ -e "$DT_BOOT" ]; then
 	bootmode="$(hexdump -v "$DT_BOOT" 2>/dev/null | awk '{print $6; exit}')"
@@ -68,7 +89,7 @@ fi
 # S01 modem init also sets it at boot+25s). The mtkmipc proto verifies
 # the radio state on interface bring-up; setting it here (S99, before
 # the wan section exists) removes the boot-ordering race.
-mipc_wan_cli --nw_radio_state_set 1 >/dev/null 2>&1 || \
+mipc_wd --nw_radio_state_set 1 >/dev/null 2>&1 || \
 	log "mipc_wan_cli radio-on failed (modem stack down?)"
 
 uci batch <<-EOF

@@ -5,6 +5,11 @@
 #   MOCK_MIPC_CID   cid returned on success (default 3)
 #   MOCK_MIPC_SIM   --show_sim_status reply (default MIPC_SIM_STATUS_COMPLETE_READY)
 #   MOCK_MIPC_PROV  --apn_provision_by_sim reply (default {})
+#   MOCK_MIPC_HANG  non-empty: hang like the real CLI with the MIPC server
+#                   down (`sleep 300`, exec'd so the watchdog's kill of this
+#                   pid really ends it); pid written to MOCK_MIPC_HANG_PIDS
+#   MOCK_MIPC_RADIO ON (default) | OFF -> --nw_radio_state_get state;
+#                   MOCK_MIPC_RADIO_FILE, if it exists, overrides it
 
 log="${MOCK_MIPC_LOG:-/dev/null}"
 line=
@@ -13,9 +18,19 @@ for a in "$@"; do
 done
 echo "$line" >> "$log"
 
+if [ -n "${MOCK_MIPC_HANG:-}" ]; then
+	echo "$$" >> "${MOCK_MIPC_HANG_PIDS:-/dev/null}"
+	exec sleep 300
+fi
+
 case "$1" in
 --nw_radio_state_get)
-	echo "Get SW radio state:MIPC_NW_RADIO_STATE_ON" ;;
+	radio="${MOCK_MIPC_RADIO:-ON}"
+	[ -n "${MOCK_MIPC_RADIO_FILE:-}" ] && [ -f "$MOCK_MIPC_RADIO_FILE" ] && \
+		radio="$(cat "$MOCK_MIPC_RADIO_FILE")"
+	echo "Get SW radio state:MIPC_NW_RADIO_STATE_$radio" ;;
+--nw_radio_state_set)
+	echo "OK" ;;
 --show_sim_status)
 	echo "${MOCK_MIPC_SIM:-MIPC_SIM_STATUS_COMPLETE_READY}" ;;
 --check_nw_status)

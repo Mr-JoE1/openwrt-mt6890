@@ -6,6 +6,27 @@ START=01
 STOP=99
 USE_PROCD=1
 
+# mipc_wan_cli has no timeout and blocks forever when the MIPC server is
+# down (dead MD); cap every call so callers can react. POSIX sh (busybox).
+# Kept as text: it is prepended to the procd one-shot's `sh -c` body.
+MIPC_WD_FN='MTKMIPC_CLI_TIMEOUT="${MTKMIPC_CLI_TIMEOUT:-10}"
+mipc_wd() {
+	mipc_wan_cli "$@" &
+	local cli_pid=$! i=0
+	while kill -0 "$cli_pid" 2>/dev/null; do
+		i=$((i + 1))
+		if [ "$i" -ge "$MTKMIPC_CLI_TIMEOUT" ]; then
+			kill "$cli_pid" 2>/dev/null
+			wait "$cli_pid" 2>/dev/null
+			logger -t mtkmipc-wd "mipc_wan_cli $* timed out after ${MTKMIPC_CLI_TIMEOUT}s"
+			return 124
+		fi
+		sleep 1
+	done
+	wait "$cli_pid" 2>/dev/null
+	return $?
+}'
+
 start_service() {
 	procd_open_instance nvram_daemon
 	procd_set_param command /usr/bin/nvram_daemon
@@ -46,7 +67,8 @@ start_service() {
 	# one-shot after the stack is up: turn the cellular radio on (stock:
 	# mipc_wan.init, START=99, `mipc_wan_cli --nw_radio_state_set 1`)
 	procd_open_instance radio_on
-	procd_set_param command /bin/sh -c "sleep 25; /usr/bin/mipc_wan_cli --nw_radio_state_set 1"
+	procd_set_param command /bin/sh -c "$MIPC_WD_FN
+PATH=/usr/bin:\$PATH; sleep 25; mipc_wd --nw_radio_state_set 1"
 	procd_set_param exit 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
