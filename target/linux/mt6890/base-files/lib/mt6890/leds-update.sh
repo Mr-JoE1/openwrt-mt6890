@@ -28,6 +28,29 @@ mipc_wd() {
 	return $?
 }
 
+# power LED boot blink, once per boot (this script is looped every 30 s by
+# mt6890-leds; the flag lives in tmpfs, so it resets on reboot). Sysfs
+# names as in etc/board.d/01_leds (led9514 green, led9515 blue). Blue
+# visually dominates green: blue 0 is written BEFORE green 1.
+# delay_on/delay_off only exist once trigger=timer is set, so the trigger
+# is written first. Every write is guarded: absent paths are skipped.
+PWR_GREEN="$LED/led9514:green:power"
+PWR_BLUE="$LED/led9515:blue:power"
+BOOTBLINK_FLAG="${MT6890_BOOTBLINK_FLAG:-/var/run/mt6890-bootblink}"
+if [ ! -e "$BOOTBLINK_FLAG" ]; then
+	: > "$BOOTBLINK_FLAG" 2>/dev/null
+	if [ -d "$PWR_BLUE" ]; then
+		[ -f "$PWR_BLUE/trigger" ] && echo timer > "$PWR_BLUE/trigger" 2>/dev/null
+		[ -f "$PWR_BLUE/delay_on" ] && echo 500 > "$PWR_BLUE/delay_on" 2>/dev/null
+		[ -f "$PWR_BLUE/delay_off" ] && echo 500 > "$PWR_BLUE/delay_off" 2>/dev/null
+		sleep 3
+		[ -f "$PWR_BLUE/trigger" ] && echo none > "$PWR_BLUE/trigger" 2>/dev/null
+		[ -f "$PWR_BLUE/brightness" ] && echo 0 > "$PWR_BLUE/brightness" 2>/dev/null
+	fi
+	[ -d "$PWR_GREEN" ] && [ -f "$PWR_GREEN/brightness" ] && \
+		echo 1 > "$PWR_GREEN/brightness" 2>/dev/null
+fi
+
 # wifi green: at least one band AP is up (IFF_UP in /sys flags)
 wifi=0
 for d in ra0 rai0; do
