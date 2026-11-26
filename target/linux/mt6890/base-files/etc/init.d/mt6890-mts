@@ -1,0 +1,40 @@
+#!/bin/sh /etc/rc.common
+# Mount the vendor NV / modem partitions before the modem stack (stock
+# init.d 0mount_all, START=00). The MD needs its NV files at boot-trigger
+# time (mt6890-modem, S01 ccci_mdinit) or it wedges and MIPC never comes up.
+START=00
+STOP=99
+DESCRIPTION="mount vendor NV/modem partitions (nvcfg, nvdata, nvram, protect, mdota, customer, data)"
+
+start() {
+	mkdir -p /mnt/vendor/nvcfg
+	mkdir -p /mnt/vendor/nvram
+	mkdir -p /mnt/vendor/proinfo
+	mkdir -p /mnt/vendor/protect_f
+	mkdir -p /mnt/vendor/protect_s
+	mkdir -p /mnt/vendor/mdota
+	mkdir -p /mnt/vendor/mdota2
+	mkdir -p /customer
+	mkdir -p /data
+	mkdir -p /vendor/firmware
+	ubiattach /dev/ubi_ctrl -p /dev/mtd48 -d 1 2>/dev/null
+	i=0
+	while [ "$i" -lt 10 ] && [ ! -e /dev/ubi1_1 ]; do
+		sleep 1
+		i=$((i+1))
+	done
+	mount -t yaffs2 /dev/mtdblock6 /mnt/vendor/nvcfg 2>/dev/null
+	mount -t yaffs2 /dev/mtdblock7 /mnt/vendor/nvdata 2>/dev/null
+	mount -t yaffs2 /dev/mtdblock16 /mnt/vendor/nvram 2>/dev/null
+	mount -t yaffs2 /dev/mtdblock8 /mnt/vendor/protect_f 2>/dev/null
+	mount -t yaffs2 /dev/mtdblock9 /mnt/vendor/protect_s 2>/dev/null
+	mount -t jffs2 /dev/mtdblock10 /mnt/vendor/mdota 2>/dev/null
+	mount -t jffs2 /dev/mtdblock11 /mnt/vendor/mdota2 2>/dev/null
+	mount -t ubifs /dev/ubi1_1 /customer 2>/dev/null
+	mount -t ubifs /dev/ubi1_2 /data 2>/dev/null
+	[ -f /mnt/vendor/nvram/raw ] || dd if=/dev/zero of=/mnt/vendor/nvram/raw bs=1024 count=24576 2>/dev/null
+	[ -f /mnt/vendor/nvram/proinfo_raw ] || dd if=/dev/zero of=/mnt/vendor/nvram/proinfo_raw bs=1024 count=512 2>/dev/null
+}
+stop() {
+	return 0
+}
