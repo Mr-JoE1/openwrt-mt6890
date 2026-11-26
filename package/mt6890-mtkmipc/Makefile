@@ -36,9 +36,25 @@ define Package/mt6890-mtkmipc/install
 	$(INSTALL_BIN) ./files/lib/netifd/proto/mtkmipc.sh $(1)/lib/netifd/proto/
 	$(INSTALL_DIR) $(1)/lib/mt6890
 	$(INSTALL_BIN) ./files/lib/mt6890/apn-wan-setup.sh $(1)/lib/mt6890/
-	$(INSTALL_DIR) $(1)/etc/init.d $(1)/etc/rc.d
+	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/etc/init.d/mt6890-apn $(1)/etc/init.d/
-	$(LN) ../init.d/mt6890-apn $(1)/etc/rc.d/S99mt6890-apn
+endef
+
+# Boot enablement the standard OpenWrt way (the old hand-made
+# etc/rc.d/S99 symlink in the ipk did not survive to the device).
+# Offline (image build, $$IPKG_INSTROOT set): enable via rc.common.
+# On a live device: enable only — mt6890-apn is a boot-only one-shot
+# that restarts the network, so do not start it from opkg.
+define Package/mt6890-mtkmipc/postinst
+#!/bin/sh
+if [ -n "$$IPKG_INSTROOT" ]; then
+	shell="$$(command -v bash)"
+	IPKG_INSTROOT="$$IPKG_INSTROOT" $${shell:-/bin/sh} "$$IPKG_INSTROOT/etc/rc.common" \
+		"$$IPKG_INSTROOT/etc/init.d/mt6890-apn" enable || true
+else
+	/etc/init.d/mt6890-apn enable || true
+fi
+exit 0
 endef
 
 $(eval $(call BuildPackage,mt6890-mtkmipc))

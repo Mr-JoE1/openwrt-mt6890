@@ -14,7 +14,9 @@
 # `/etc/init.d/mt6890-apn start` manually.
 #
 # MTKMIPC_NETWORK_CFG / MTKMIPC_DT_BOOT override the config / DT paths
-# for the host tests (same convention as MTKMIPC_LOCK in the proto).
+# for the host tests (same convention as MTKMIPC_LOCK in the proto);
+# MTKMIPC_MDINIT / MTKMIPC_MDINIT_SLEEP override the MD re-trigger binary
+# and the gate's poll interval the same way.
 
 set -u
 
@@ -91,6 +93,36 @@ fi
 # the wan section exists) removes the boot-ordering race.
 mipc_wd --nw_radio_state_set 1 >/dev/null 2>&1 || \
 	log "mipc_wan_cli radio-on failed (modem stack down?)"
+
+# modem health gate (v3.1): if the MD wedged at boot (NV files raced its
+# trigger) the radio never comes on; re-trigger the MD power-on once and
+# wait at most 6 x 10 s, then continue regardless so boot never blocks.
+# ccci_mdinit is backgrounded: it is a long-running daemon (mt6890-modem
+# runs it under procd respawn), so a foreground call could block forever.
+MDINIT="${MTKMIPC_MDINIT:-/usr/bin/ccci_mdinit}"
+MDINIT_SLEEP="${MTKMIPC_MDINIT_SLEEP:-10}"
+out="$(mipc_wd --nw_radio_state_get 0)"
+if [ "$out" != "Get SW radio state:MIPC_NW_RADIO_STATE_ON" ]; then
+	log "radio off or MD down ('$out'); re-triggering cci_mdinit"
+	"$MDINIT" 0 >/dev/null 2>&1 &
+	i=0
+	while [ "$i" -lt 6 ]; do
+		sleep "$MDINIT_SLEEP"
+		i=$((i + 1))
+		out="$(mipc_wd --nw_radio_state_get 0)"
+		[ "$out" = "Get SW radio state:MIPC_NW_RADIO_STATE_ON" ] && break
+	done
+	[ "$out" = "Get SW radio state:MIPC_NW_RADIO_STATE_ON" ] || \
+		log "radio still off after re-trigger; continuing boot"
+fi
+
+# the device network config has no wan/wan6 sections by default, and
+# `uci set network.wan.<opt>` on a missing section fails ("Invalid
+# argument"). Create them as NAMED interface sections: `uci add network
+# wan` would add an anonymous section of type "wan" (cfgXXXX), leaving
+# network.wan missing.
+[ -n "$(uci -q get network.wan)" ] || uci -q set network.wan=interface
+[ -n "$(uci -q get network.wan6)" ] || uci -q set network.wan6=interface
 
 uci batch <<-EOF
 	set network.wan.proto='mtkmipc'

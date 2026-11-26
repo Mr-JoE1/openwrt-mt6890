@@ -194,10 +194,18 @@ if [ "${2:-}" = get ]; then
 		[ -n "${MOCK_UCI_PROTO:-}" ] && echo "$MOCK_UCI_PROTO"
 	elif [ "$3" = "network.wan.auto_conf" ]; then
 		[ -n "${MOCK_UCI_AUTOCONF:-}" ] && echo "$MOCK_UCI_AUTOCONF"
+	elif [ "$3" = "network.wan" ] || [ "$3" = "network.wan6" ]; then
+		[ -n "${MOCK_UCI_HAVE_WAN:-}" ] && echo interface
 	fi
 	exit 0
 fi
-[ "${1:-}" = batch ] && cat >> "${MOCK_UCI_LOG:-/dev/null}"
+# sequence log: every non-get call, in order ("batch" for uci batch)
+if [ "${1:-}" = batch ]; then
+	echo batch >> "${MOCK_UCI_SEQ:-/dev/null}"
+	cat >> "${MOCK_UCI_LOG:-/dev/null}"
+else
+	echo "$*" >> "${MOCK_UCI_SEQ:-/dev/null}"
+fi
 exit 0
 EOF
 cat > "$APNBIN/service" <<'EOF'
@@ -216,19 +224,37 @@ echo "$*" >> "${MOCK_APN_LOG:-/dev/null}"
 exit 0
 EOF
 chmod +x "$APNBIN/uci" "$APNBIN/service" "$APNBIN/hexdump" "$APNBIN/logger"
-export MOCK_UCI_LOG MOCK_SERVICE_LOG MOCK_APN_LOG
+MOCK_UCI_SEQ="$T/apn-uci-seq.log"
+MOCK_MDINIT_LOG="$T/apn-mdinit.log"
+# ccci_mdinit stub: records argv; MOCK_MDINIT_RADIO_ON=1 -> MD comes up
+# (the mock CLI then reports radio ON via MOCK_MIPC_RADIO_FILE)
+cat > "$APNBIN/ccci_mdinit" <<'EOF'
+#!/bin/sh
+echo "$*" >> "${MOCK_MDINIT_LOG:-/dev/null}"
+[ -n "${MOCK_MDINIT_RADIO_ON:-}" ] && echo ON > "$MOCK_MIPC_RADIO_FILE"
+exit 0
+EOF
+chmod +x "$APNBIN/ccci_mdinit"
+export MOCK_UCI_LOG MOCK_SERVICE_LOG MOCK_APN_LOG MOCK_UCI_SEQ MOCK_MDINIT_LOG
+export MOCK_MIPC_RADIO_FILE="$T/apn-radio"
 export MOCK_UCI_AUTOADAPT= MOCK_UCI_PROTO= MOCK_UCI_AUTOCONF= MOCK_HEXDUMP_LINE=
+export MOCK_UCI_HAVE_WAN= MOCK_MDINIT_RADIO_ON=
 
 apn_reset() {
 	: > "$MOCK_UCI_LOG"; : > "$MOCK_SERVICE_LOG"; : > "$MOCK_APN_LOG"
+	: > "$MOCK_UCI_SEQ"; : > "$MOCK_MDINIT_LOG"; : > "$MOCK_MIPC_LOG"
+	rm -f "$MOCK_MIPC_RADIO_FILE"
 	printf 'config interface "loopback"\n' > "$APN_NET"
 	export MOCK_UCI_AUTOADAPT= MOCK_UCI_PROTO= MOCK_UCI_AUTOCONF= MOCK_HEXDUMP_LINE=
+	export MOCK_UCI_HAVE_WAN= MOCK_MDINIT_RADIO_ON= MOCK_MIPC_HANG=
 }
-apn_run() { # apn_run [dt_node] (default: node does not exist)
+apn_run() { # apn_run [dt_node] (default: node does not exist); bounded
 	( PATH="$APNBIN:$PATH" \
 	  MTKMIPC_NETWORK_CFG="$APN_NET" \
 	  MTKMIPC_DT_BOOT="${1:-$T/apn/no-such-dt-node}" \
-	  sh "$APN" ) > "$T/apn-out" 2> "$T/apn-err"
+	  MTKMIPC_MDINIT="$APNBIN/ccci_mdinit" \
+	  MTKMIPC_MDINIT_SLEEP="${APN_MDINIT_SLEEP:-0}" \
+	  timeout 120 sh "$APN" ) > "$T/apn-out" 2> "$T/apn-err"
 }
 
 # meta boot mode: atag,boot hexdump field 6 == 0001 -> skip (guard 1)
@@ -303,6 +329,73 @@ apn_run
 rc=$?
 check "apn proto=dhcp: rc 0" [ "$rc" -eq 0 ]
 check "apn proto=dhcp: uci batch written" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
+
+# v3.1 D1: no wan/wan6 sections (device default) -> created before the batch
+apn_reset
+apn_run
+rc=$?
+seq1="$(sed -n 1p "$MOCK_UCI_SEQ")"; seq2="$(sed -n 2p "$MOCK_UCI_SEQ")"; seq3="$(sed -n 3p "$MOCK_UCI_SEQ")"
+check "apn no-wan: rc 0" [ "$rc" -eq 0 ]
+check "apn no-wan: 1st creates network.wan" [ "$seq1" = "-q set network.wan=interface" ]
+check "apn no-wan: 2nd creates network.wan6" [ "$seq2" = "-q set network.wan6=interface" ]
+check "apn no-wan: batch only after both exist" [ "$seq3" = "batch" ]
+check "apn no-wan: batch sets proto" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
+
+# v3.1 D1: sections already present -> not re-created
+apn_reset
+export MOCK_UCI_HAVE_WAN=1
+apn_run
+check "apn have-wan: rc 0" [ $? -eq 0 ]
+check "apn have-wan: only the batch" [ "$(cat "$MOCK_UCI_SEQ")" = "batch" ]
+
+# v3.1 D2: radio ON -> health gate passes, no MD re-trigger
+apn_reset
+apn_run
+check "apn gate on: radio state queried" has "$MOCK_MIPC_LOG" "--nw_radio_state_get | 0"
+check "apn gate on: no ccci_mdinit" [ ! -s "$MOCK_MDINIT_LOG" ]
+
+# v3.1 D2: radio OFF, MD comes back after re-trigger -> stop polling early
+apn_reset
+export MOCK_MIPC_RADIO=OFF MOCK_MDINIT_RADIO_ON=1
+# 1 s poll: ccci_mdinit is backgrounded, give the stub time to "bring up" the MD
+APN_MDINIT_SLEEP=1 apn_run
+rc=$?
+check "apn gate recover: rc 0" [ "$rc" -eq 0 ]
+check "apn gate recover: ccci_mdinit 0 called" [ "$(cat "$MOCK_MDINIT_LOG")" = "0" ]
+check "apn gate recover: logged re-trigger" has "$MOCK_APN_LOG" "re-triggering cci_mdinit"
+check "apn gate recover: 2 radio queries (1 + 1 poll)" \
+	[ "$(grep -cF -- '--nw_radio_state_get' "$MOCK_MIPC_LOG")" -eq 2 ]
+check "apn gate recover: no still-off log" eval "! grep -qF 'still off' '$MOCK_APN_LOG'"
+check "apn gate recover: wan created" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
+
+# v3.1 D2: radio stays OFF -> bounded 6 polls, logged, boot continues
+apn_reset
+export MOCK_MIPC_RADIO=OFF
+apn_run
+rc=$?
+check "apn gate dead: rc 0" [ "$rc" -eq 0 ]
+check "apn gate dead: 1 + 6 radio queries" \
+	[ "$(grep -cF -- '--nw_radio_state_get' "$MOCK_MIPC_LOG")" -eq 7 ]
+check "apn gate dead: logged still off" has "$MOCK_APN_LOG" "radio still off after re-trigger; continuing boot"
+check "apn gate dead: wan still created" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
+check "apn gate dead: network restart" [ "$(cat "$MOCK_SERVICE_LOG")" = "network restart" ]
+
+# v3.1 D2: MIPC server down (CLI hangs) -> every gate call watchdog-capped
+apn_reset
+export MOCK_MIPC_RADIO= MOCK_MIPC_HANG=1
+export MTKMIPC_CLI_TIMEOUT=1
+t0=$(date +%s)
+apn_run
+rc=$?
+el=$(( $(date +%s) - t0 ))
+unset MTKMIPC_CLI_TIMEOUT
+export MOCK_MIPC_HANG=
+check "apn gate hang: rc 0 (not killed by outer timeout)" [ "$rc" -eq 0 ]
+check "apn gate hang: bounded (<60 s, took ${el}s)" [ "$el" -lt 60 ]
+check "apn gate hang: watchdog logged" has "$MOCK_APN_LOG" "-t mtkmipc-wd"
+check "apn gate hang: ccci_mdinit re-triggered" [ "$(cat "$MOCK_MDINIT_LOG")" = "0" ]
+check "apn gate hang: wan still created" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
+export MOCK_MIPC_RADIO=
 
 # --- 10. hanging mipc_wan_cli (MIPC server down): watchdog (v3.1 C) ---
 # Separate script (own scratch root, bounded by host `timeout`); its
