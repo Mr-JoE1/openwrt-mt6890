@@ -170,22 +170,23 @@ proto teardown wan '{}'
 # --- 8. lock file used ---
 check "flock: lock file created" [ -e "$MTKMIPC_LOCK" ]
 
-# --- 9. apn-wan-setup.sh: boot-time WAN creation guards (issue #2) ---
+# --- 9. apn-wan-setup.sh: boot-time guards (issue #2) ---
+# The retry-until-registered state machine itself (v3.1.1 item 2) is
+# covered by apn-retry.sh (section 12); here only the skip guards, which
+# must exit 0 before any modem call.
 APN="$PKG/files/lib/mt6890/apn-wan-setup.sh"
 APNBIN="$T/apnbin"
 APN_NET="$T/apn/network"
 MOCK_UCI_LOG="$T/apn-uci.log"
-MOCK_SERVICE_LOG="$T/apn-service.log"
 MOCK_APN_LOG="$T/apn-logger.log"
 mkdir -p "$APNBIN" "$(dirname "$APN_NET")"
 
 # stubs on a private PATH (proto tests above are unaffected):
-#   uci      -q get <selector> answers from MOCK_UCI_AUTOADAPT/_PROTO/_AUTOCONF
-#             (empty = option unset); `uci batch` records its stdin
-#   service  records "network restart"
+#   uci      -q get <selector> answers from MOCK_UCI_AUTOADAPT/_PROTO/_AUTOCONF/_APN
+#             (empty = option unset); every other call is recorded
 #   hexdump  one canned line, MOCK_HEXDUMP_LINE (field 6 = meta flag)
 #   logger   records every call (tag must be mt6890-apn)
-cat > "$APNBIN/uci" <<'EOF'
+cat > "$APNBIN/uci" <<'EOF2'
 #!/bin/sh
 if [ "${2:-}" = get ]; then
 	if [ "$3" = "system.@system[0].ql_wan_lan_auto_adapt" ]; then
@@ -194,208 +195,85 @@ if [ "${2:-}" = get ]; then
 		[ -n "${MOCK_UCI_PROTO:-}" ] && echo "$MOCK_UCI_PROTO"
 	elif [ "$3" = "network.wan.auto_conf" ]; then
 		[ -n "${MOCK_UCI_AUTOCONF:-}" ] && echo "$MOCK_UCI_AUTOCONF"
-	elif [ "$3" = "network.wan" ] || [ "$3" = "network.wan6" ]; then
-		[ -n "${MOCK_UCI_HAVE_WAN:-}" ] && echo interface
+	elif [ "$3" = "network.wan.apn" ]; then
+		[ -n "${MOCK_UCI_APN:-}" ] && echo "$MOCK_UCI_APN"
 	fi
 	exit 0
 fi
-# sequence log: every non-get call, in order ("batch" for uci batch)
-if [ "${1:-}" = batch ]; then
-	echo batch >> "${MOCK_UCI_SEQ:-/dev/null}"
-	cat >> "${MOCK_UCI_LOG:-/dev/null}"
-else
-	echo "$*" >> "${MOCK_UCI_SEQ:-/dev/null}"
-fi
+echo "$*" >> "${MOCK_UCI_LOG:-/dev/null}"
 exit 0
-EOF
-cat > "$APNBIN/service" <<'EOF'
-#!/bin/sh
-echo "$*" >> "${MOCK_SERVICE_LOG:-/dev/null}"
-exit 0
-EOF
-cat > "$APNBIN/hexdump" <<'EOF'
+EOF2
+cat > "$APNBIN/hexdump" <<'EOF2'
 #!/bin/sh
 echo "${MOCK_HEXDUMP_LINE:-0000000 0000 0000 0000 0000 0000 0000 0000 0000}"
 exit 0
-EOF
-cat > "$APNBIN/logger" <<'EOF'
+EOF2
+cat > "$APNBIN/logger" <<'EOF2'
 #!/bin/sh
 echo "$*" >> "${MOCK_APN_LOG:-/dev/null}"
 exit 0
-EOF
-chmod +x "$APNBIN/uci" "$APNBIN/service" "$APNBIN/hexdump" "$APNBIN/logger"
-MOCK_UCI_SEQ="$T/apn-uci-seq.log"
-MOCK_MDINIT_LOG="$T/apn-mdinit.log"
-# ccci_mdinit stub: records argv; MOCK_MDINIT_RADIO_ON=1 -> MD comes up
-# (the mock CLI then reports radio ON via MOCK_MIPC_RADIO_FILE)
-cat > "$APNBIN/ccci_mdinit" <<'EOF'
-#!/bin/sh
-echo "$*" >> "${MOCK_MDINIT_LOG:-/dev/null}"
-[ -n "${MOCK_MDINIT_RADIO_ON:-}" ] && echo ON > "$MOCK_MIPC_RADIO_FILE"
-exit 0
-EOF
-chmod +x "$APNBIN/ccci_mdinit"
-export MOCK_UCI_LOG MOCK_SERVICE_LOG MOCK_APN_LOG MOCK_UCI_SEQ MOCK_MDINIT_LOG
-export MOCK_MIPC_RADIO_FILE="$T/apn-radio"
-export MOCK_UCI_AUTOADAPT= MOCK_UCI_PROTO= MOCK_UCI_AUTOCONF= MOCK_HEXDUMP_LINE=
-export MOCK_UCI_HAVE_WAN= MOCK_MDINIT_RADIO_ON=
+EOF2
+chmod +x "$APNBIN/uci" "$APNBIN/hexdump" "$APNBIN/logger"
+export MOCK_UCI_LOG MOCK_APN_LOG
 
 apn_reset() {
-	: > "$MOCK_UCI_LOG"; : > "$MOCK_SERVICE_LOG"; : > "$MOCK_APN_LOG"
-	: > "$MOCK_UCI_SEQ"; : > "$MOCK_MDINIT_LOG"; : > "$MOCK_MIPC_LOG"
-	rm -f "$MOCK_MIPC_RADIO_FILE"
+	: > "$MOCK_UCI_LOG"; : > "$MOCK_APN_LOG"; : > "$MOCK_MIPC_LOG"
 	printf 'config interface "loopback"\n' > "$APN_NET"
-	export MOCK_UCI_AUTOADAPT= MOCK_UCI_PROTO= MOCK_UCI_AUTOCONF= MOCK_HEXDUMP_LINE=
-	export MOCK_UCI_HAVE_WAN= MOCK_MDINIT_RADIO_ON= MOCK_MIPC_HANG=
+	export MOCK_UCI_AUTOADAPT= MOCK_UCI_PROTO= MOCK_UCI_AUTOCONF= MOCK_UCI_APN=
+	export MOCK_HEXDUMP_LINE= MOCK_MIPC_HANG=
 }
 apn_run() { # apn_run [dt_node] (default: node does not exist); bounded
 	( PATH="$APNBIN:$PATH" \
 	  MTKMIPC_NETWORK_CFG="$APN_NET" \
 	  MTKMIPC_DT_BOOT="${1:-$T/apn/no-such-dt-node}" \
-	  MTKMIPC_MDINIT="$APNBIN/ccci_mdinit" \
-	  MTKMIPC_MDINIT_SLEEP="${APN_MDINIT_SLEEP:-0}" \
-	  timeout 120 sh "$APN" ) > "$T/apn-out" 2> "$T/apn-err"
+	  MTKMIPC_MDINIT=/bin/false \
+	  timeout 60 sh "$APN" ) > "$T/apn-out" 2> "$T/apn-err"
+}
+apn_skipped() { # every guard: rc 0, no uci write, no modem call, logged
+	check "$1: rc 0" [ "$rc" -eq 0 ]
+	check "$1: no uci write" [ ! -s "$MOCK_UCI_LOG" ]
+	check "$1: no mipc_wan_cli call" [ ! -s "$MOCK_MIPC_LOG" ]
+	check "$1: logged skip" has "$MOCK_APN_LOG" "mt6890-apn"
 }
 
 # meta boot mode: atag,boot hexdump field 6 == 0001 -> skip (guard 1)
 apn_reset
 export MOCK_HEXDUMP_LINE="0000000 0000 0000 0000 0000 0001"
-apn_run "$APN_NET"
-rc=$?
-check "apn meta: rc 0" [ "$rc" -eq 0 ]
-check "apn meta: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
-check "apn meta: no network restart" [ ! -s "$MOCK_SERVICE_LOG" ]
-check "apn meta: logged skip" has "$MOCK_APN_LOG" "mt6890-apn"
+apn_run "$APN_NET"; rc=$?
+apn_skipped "apn meta"
 
 # /etc/config/network empty -> skip (guard 2)
 apn_reset
 : > "$APN_NET"
-apn_run
-rc=$?
-check "apn empty cfg: rc 0" [ "$rc" -eq 0 ]
-check "apn empty cfg: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
-check "apn empty cfg: logged skip" has "$MOCK_APN_LOG" "mt6890-apn"
+apn_run; rc=$?
+apn_skipped "apn empty cfg"
 
 # stock ql_wan_lan_auto_adapt=1 -> skip (guard 3)
 apn_reset
 export MOCK_UCI_AUTOADAPT=1
-apn_run
-rc=$?
-check "apn autoadapt: rc 0" [ "$rc" -eq 0 ]
-check "apn autoadapt: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
-check "apn autoadapt: no network restart" [ ! -s "$MOCK_SERVICE_LOG" ]
-check "apn autoadapt: logged skip" has "$MOCK_APN_LOG" "mt6890-apn"
+apn_run; rc=$?
+apn_skipped "apn autoadapt"
 
-# WAN proto already mipc/ql_mipc/mtkmipc -> skip (guard 4)
-for p in mtkmipc ql_mipc mipc; do
+# WAN proto = stock vendor mipc/ql_mipc -> skip (guard 4)
+for p in ql_mipc mipc; do
 	apn_reset
 	export MOCK_UCI_PROTO="$p"
-	apn_run
-	rc=$?
-	check "apn proto=$p: rc 0" [ "$rc" -eq 0 ]
-	check "apn proto=$p: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
-	check "apn proto=$p: no network restart" [ ! -s "$MOCK_SERVICE_LOG" ]
+	apn_run; rc=$?
+	apn_skipped "apn proto=$p"
 done
+
+# WAN proto = user-configured mtkmipc (APN set) -> skip (guard 4b)
+apn_reset
+export MOCK_UCI_PROTO=mtkmipc MOCK_UCI_APN=internet
+apn_run; rc=$?
+apn_skipped "apn proto=mtkmipc+apn"
 
 # auto_conf=0 -> skip (guard 5)
 apn_reset
 export MOCK_UCI_AUTOCONF=0
-apn_run
-rc=$?
-check "apn auto_conf=0: rc 0" [ "$rc" -eq 0 ]
-check "apn auto_conf=0: no uci batch" [ ! -s "$MOCK_UCI_LOG" ]
-check "apn auto_conf=0: logged skip" has "$MOCK_APN_LOG" "mt6890-apn"
-
-# fresh config (auto_conf unset = default 1), DT node present, not meta:
-# minimal batch + service network restart
+apn_run; rc=$?
+apn_skipped "apn auto_conf=0"
 apn_reset
-apn_run "$APN_NET"
-rc=$?
-check "apn fresh: rc 0" [ "$rc" -eq 0 ]
-check "apn fresh: batch sets proto" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
-check "apn fresh: batch sets ifname" has "$MOCK_UCI_LOG" "set network.wan.ifname='ccmni'"
-check "apn fresh: batch sets wan6 ifname" has "$MOCK_UCI_LOG" "set network.wan6.ifname='ccmni'"
-check "apn fresh: batch commits" has "$MOCK_UCI_LOG" "commit network"
-check "apn fresh: batch is exactly 4 lines" [ "$(grep -c . "$MOCK_UCI_LOG")" -eq 4 ]
-check "apn fresh: no apn/auth fields cached" hasnt "$MOCK_UCI_LOG" "network.wan.apn"
-check "apn fresh: service network restart" [ "$(cat "$MOCK_SERVICE_LOG")" = "network restart" ]
-check "apn fresh: logged success" has "$MOCK_APN_LOG" "mt6890-apn"
-check "apn fresh: no stderr noise" [ ! -s "$T/apn-err" ]
-
-# non-MIPC proto: stock semantics replace it (only mipc protos are kept)
-apn_reset
-export MOCK_UCI_PROTO=dhcp
-apn_run
-rc=$?
-check "apn proto=dhcp: rc 0" [ "$rc" -eq 0 ]
-check "apn proto=dhcp: uci batch written" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
-
-# v3.1 D1: no wan/wan6 sections (device default) -> created before the batch
-apn_reset
-apn_run
-rc=$?
-seq1="$(sed -n 1p "$MOCK_UCI_SEQ")"; seq2="$(sed -n 2p "$MOCK_UCI_SEQ")"; seq3="$(sed -n 3p "$MOCK_UCI_SEQ")"
-check "apn no-wan: rc 0" [ "$rc" -eq 0 ]
-check "apn no-wan: 1st creates network.wan" [ "$seq1" = "-q set network.wan=interface" ]
-check "apn no-wan: 2nd creates network.wan6" [ "$seq2" = "-q set network.wan6=interface" ]
-check "apn no-wan: batch only after both exist" [ "$seq3" = "batch" ]
-check "apn no-wan: batch sets proto" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
-
-# v3.1 D1: sections already present -> not re-created
-apn_reset
-export MOCK_UCI_HAVE_WAN=1
-apn_run
-check "apn have-wan: rc 0" [ $? -eq 0 ]
-check "apn have-wan: only the batch" [ "$(cat "$MOCK_UCI_SEQ")" = "batch" ]
-
-# v3.1 D2: radio ON -> health gate passes, no MD re-trigger
-apn_reset
-apn_run
-check "apn gate on: radio state queried" has "$MOCK_MIPC_LOG" "--nw_radio_state_get | 0"
-check "apn gate on: no ccci_mdinit" [ ! -s "$MOCK_MDINIT_LOG" ]
-
-# v3.1 D2: radio OFF, MD comes back after re-trigger -> stop polling early
-apn_reset
-export MOCK_MIPC_RADIO=OFF MOCK_MDINIT_RADIO_ON=1
-# 1 s poll: ccci_mdinit is backgrounded, give the stub time to "bring up" the MD
-APN_MDINIT_SLEEP=1 apn_run
-rc=$?
-check "apn gate recover: rc 0" [ "$rc" -eq 0 ]
-check "apn gate recover: ccci_mdinit 0 called" [ "$(cat "$MOCK_MDINIT_LOG")" = "0" ]
-check "apn gate recover: logged re-trigger" has "$MOCK_APN_LOG" "re-triggering cci_mdinit"
-check "apn gate recover: 2 radio queries (1 + 1 poll)" \
-	[ "$(grep -cF -- '--nw_radio_state_get' "$MOCK_MIPC_LOG")" -eq 2 ]
-check "apn gate recover: no still-off log" eval "! grep -qF 'still off' '$MOCK_APN_LOG'"
-check "apn gate recover: wan created" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
-
-# v3.1 D2: radio stays OFF -> bounded 6 polls, logged, boot continues
-apn_reset
-export MOCK_MIPC_RADIO=OFF
-apn_run
-rc=$?
-check "apn gate dead: rc 0" [ "$rc" -eq 0 ]
-check "apn gate dead: 1 + 6 radio queries" \
-	[ "$(grep -cF -- '--nw_radio_state_get' "$MOCK_MIPC_LOG")" -eq 7 ]
-check "apn gate dead: logged still off" has "$MOCK_APN_LOG" "radio still off after re-trigger; continuing boot"
-check "apn gate dead: wan still created" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
-check "apn gate dead: network restart" [ "$(cat "$MOCK_SERVICE_LOG")" = "network restart" ]
-
-# v3.1 D2: MIPC server down (CLI hangs) -> every gate call watchdog-capped
-apn_reset
-export MOCK_MIPC_RADIO= MOCK_MIPC_HANG=1
-export MTKMIPC_CLI_TIMEOUT=1
-t0=$(date +%s)
-apn_run
-rc=$?
-el=$(( $(date +%s) - t0 ))
-unset MTKMIPC_CLI_TIMEOUT
-export MOCK_MIPC_HANG=
-check "apn gate hang: rc 0 (not killed by outer timeout)" [ "$rc" -eq 0 ]
-check "apn gate hang: bounded (<60 s, took ${el}s)" [ "$el" -lt 60 ]
-check "apn gate hang: watchdog logged" has "$MOCK_APN_LOG" "-t mtkmipc-wd"
-check "apn gate hang: ccci_mdinit re-triggered" [ "$(cat "$MOCK_MDINIT_LOG")" = "0" ]
-check "apn gate hang: wan still created" has "$MOCK_UCI_LOG" "set network.wan.proto='mtkmipc'"
-export MOCK_MIPC_RADIO=
 
 # --- 10. hanging mipc_wan_cli (MIPC server down): watchdog (v3.1 C) ---
 # Separate script (own scratch root, bounded by host `timeout`); its
@@ -408,6 +286,39 @@ if [ -n "$hp" ] && [ -n "$hf" ]; then
 	PASS=$((PASS + hp)); FAIL=$((FAIL + hf))
 else
 	bad "hang-cli.sh: no RESULT line"; cat "$T/hang.out"
+fi
+
+# --- 11. mt6890-modem radio_on one-shot: gated + watchdogged (v3.1.1 item 6) ---
+PROTO_SHELL="$PROTO_SHELL" OPENWRT_TOP="$TOP" sh "$HERE/radio-on.sh" > "$T/radio.out" 2>&1
+grep -E '^\[(PASS|FAIL)\] ' "$T/radio.out"
+rp="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\1/p' "$T/radio.out")"
+rf="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\2/p' "$T/radio.out")"
+if [ -n "$rp" ] && [ -n "$rf" ]; then
+	PASS=$((PASS + rp)); FAIL=$((FAIL + rf))
+else
+	bad "radio-on.sh: no RESULT line"; cat "$T/radio.out"
+fi
+
+# --- 12. mt6890-apn retry-until-registered state machine (v3.1.1 item 2) ---
+PROTO_SHELL="$PROTO_SHELL" sh "$HERE/apn-retry.sh" > "$T/apnr.out" 2>&1
+grep -E '^\[(PASS|FAIL)\] ' "$T/apnr.out"
+ap="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\1/p' "$T/apnr.out")"
+af="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\2/p' "$T/apnr.out")"
+if [ -n "$ap" ] && [ -n "$af" ]; then
+	PASS=$((PASS + ap)); FAIL=$((FAIL + af))
+else
+	bad "apn-retry.sh: no RESULT line"; cat "$T/apnr.out"
+fi
+
+# --- 13. mt6890-leds cellular status LED service (v3.1.1 item 3) ---
+PROTO_SHELL="$PROTO_SHELL" OPENWRT_TOP="$TOP" sh "$HERE/leds.sh" > "$T/leds.out" 2>&1
+grep -E '^\[(PASS|FAIL)\] ' "$T/leds.out"
+lp="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\1/p' "$T/leds.out")"
+lf="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\2/p' "$T/leds.out")"
+if [ -n "$lp" ] && [ -n "$lf" ]; then
+	PASS=$((PASS + lp)); FAIL=$((FAIL + lf))
+else
+	bad "leds.sh: no RESULT line"; cat "$T/leds.out"
 fi
 
 echo "RESULT: $PASS passed, $FAIL failed"

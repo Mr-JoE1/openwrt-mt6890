@@ -1,51 +1,140 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# Boot-time creation of the mtkmipc WAN interface (issue #2, final piece).
-# Port of the stock etc/init.d/mipc_wan.init role: netifd only calls the
-# mtkmipc proto handler once network.wan exists, so this one-shot creates
-# the minimal section (proto/ifname). No APN data is written here: the
-# proto's mtkmipc_apn_provision() fills apn/auth/user/password/iptype/
-# rattype/... from the SIM database on bring-up (auto_conf, default 1).
+# Boot-time cellular WAN bring-up (v3.1.1 item 2): retry until registered.
+# Port of the stock etc/init.d/mipc_wan.init role. Started once from
+# /etc/init.d/mt6890-apn (procd one-shot, no respawn) so the ~15 min budget
+# never holds up boot.
 #
-# Started once from /etc/init.d/mt6890-apn at S99 (stock mipc_wan.init
-# timing: after the S01 modem daemon stack and its radio_on step). No
-# respawn, no retry: if the modem stack was down at boot, re-run
-# `/etc/init.d/mt6890-apn start` manually.
+# State machine (total budget ~15 min, then exit 0):
+#   1. poll --show_register_status every 30 s
+#        HOME / ROAMING           -> 2
+#        NOT_REGISTERED/SEARCHING -> keep polling (UNKNOWN too: MD answers)
+#        no response (MD down)    -> re-run ccci_mdinit 0 (max 3x total)
+#   2. --data_call_act (apn "0" = network default); accept "result": 0;
+#        anything else (1316594 = no registered network) -> back to 1
+#   3. configure from the reply JSON (plain-shell parsed):
+#        network.wan = proto none, device <ifname>, dns v4_dns1/v4_dns2
+#        (netifd owns resolv.conf.auto; network.wan sits in the firewall
+#        wan zone) + <ifname> added to the wan zone explicitly (masq on),
+#        then ip link up / addr add / default route (EEXIST tolerated: the
+#        ccmni driver auto-assigns the PDP address)
+#   4. success -> exit 0; budget exhausted -> log, exit 0
+# Every mipc_wan_cli call goes through the 8 s probe() watchdog (live-
+# proven pattern, verbatim): the CLI hangs forever when MIPC is down.
+# POSIX sh (busybox ash: no timeout, no jq).
 #
-# MTKMIPC_NETWORK_CFG / MTKMIPC_DT_BOOT override the config / DT paths
-# for the host tests (same convention as MTKMIPC_LOCK in the proto);
-# MTKMIPC_MDINIT / MTKMIPC_MDINIT_SLEEP override the MD re-trigger binary
-# and the gate's poll interval the same way.
+# Test-only overrides: MTKMIPC_NETWORK_CFG, MTKMIPC_DT_BOOT, MTKMIPC_MDINIT,
+# MT6890_INITD, MT6890_APN_BUDGET (s), MT6890_APN_POLL (s), MT6890_APN_SETTLE (s).
 
 set -u
 
 NETWORK_CFG="${MTKMIPC_NETWORK_CFG:-/etc/config/network}"
 DT_BOOT="${MTKMIPC_DT_BOOT:-/proc/device-tree/chosen/atag,boot}"
+MDINIT="${MTKMIPC_MDINIT:-/usr/bin/ccci_mdinit}"
+INITD="${MT6890_INITD:-/etc/init.d}"
+BUDGET="${MT6890_APN_BUDGET:-900}"
+POLL="${MT6890_APN_POLL:-30}"
+SETTLE="${MT6890_APN_SETTLE:-3}"
+MDINIT_MAX=3
+PATH="$PATH:/usr/bin:/usr/sbin"
+
+# network default APN; never a hardcoded operator APN
+ACT_JSON='{"apn":"0","ip_type":3,"roaming_type":3,"auth_type":0,"username":"","password":"","bearer_bitmask":"0xfffdffff","mtu":1500,"mode":1}'
 
 log() {
 	logger -t mt6890-apn "$*"
 }
 
-MTKMIPC_CLI_TIMEOUT="${MTKMIPC_CLI_TIMEOUT:-10}"
+probe() {
+  ( "$@" >/tmp/.g_out 2>&1 & gp=$!; sleep 8; kill $gp >/dev/null 2>&1
+    wait $gp >/dev/null 2>&1 )
+  out=$(cat /tmp/.g_out 2>/dev/null)
+}
 
-# mipc_wan_cli has no timeout and blocks forever when the MIPC server is
-# down (dead MD); cap every call so callers can react. POSIX sh (busybox).
-mipc_wd() {
-	mipc_wan_cli "$@" &
-	local cli_pid=$! i=0
-	while kill -0 "$cli_pid" 2>/dev/null; do
-		i=$((i + 1))
-		if [ "$i" -ge "$MTKMIPC_CLI_TIMEOUT" ]; then
-			kill "$cli_pid" 2>/dev/null
-			wait "$cli_pid" 2>/dev/null
-			logger -t mtkmipc-wd "mipc_wan_cli $* timed out after ${MTKMIPC_CLI_TIMEOUT}s"
-			return 124
-		fi
-		sleep 1
-	done
-	wait "$cli_pid" 2>/dev/null
-	return $?
+# jget <key>: value of "key": <v> / "key": "<v>" from the reply in $out
+jget() {
+	echo "$out" | sed -n "s/.*\"$1\": *\"\{0,1\}\([^\", }]*\)\"\{0,1\}.*/\1/p" | head -n1
+}
+
+# run "ip ..." tolerating EEXIST (address/route already there)
+ip_tol() {
+	local res
+	res="$(ip "$@" 2>&1)" && return 0
+	case "$res" in
+	*"File exists"*|*EEXIST*) log "ip $*: already present (ok)"; return 0 ;;
+	esac
+	log "ip $* failed: $res"
+	return 1
+}
+
+# put <ifn> into network.wan (proto none) + the firewall wan zone
+uci_wan() {
+	local ifn="$1" dns1="$2" dns2="$3" zone fwd
+	# network.wan: the data call is placed here, so netifd only has to
+	# own the device + DNS (proto none: no second data call via mtkmipc)
+	[ -n "$(uci -q get network.wan)" ] || uci -q set network.wan=interface
+	uci -q set network.wan.proto='none'
+	uci -q delete network.wan.ifname
+	uci -q set network.wan.device="$ifn"
+	uci -q delete network.wan.dns
+	[ -n "$dns1" ] && uci -q add_list network.wan.dns="$dns1"
+	[ -n "$dns2" ] && uci -q add_list network.wan.dns="$dns2"
+	uci -q commit network
+
+	# firewall wan zone: covers network 'wan' (default config) AND gets
+	# <ifn> as an explicit device so LAN->WAN forward + NAT always match
+	zone="$(uci -q show firewall | sed -n "s/^firewall\.\([^.]*\)\.name='wan'$/\1/p" | head -n1)"
+	if [ -z "$zone" ]; then
+		log "no firewall wan zone: creating one"
+		zone="$(uci -q add firewall zone)"
+		uci -q set firewall."$zone".name='wan'
+		uci -q set firewall."$zone".input='REJECT'
+		uci -q set firewall."$zone".output='ACCEPT'
+		uci -q set firewall."$zone".forward='REJECT'
+		uci -q set firewall."$zone".mtu_fix='1'
+		uci -q add_list firewall."$zone".network='wan'
+		fwd="$(uci -q add firewall forwarding)"
+		uci -q set firewall."$fwd".src='lan'
+		uci -q set firewall."$fwd".dest='wan'
+	fi
+	uci -q set firewall."$zone".masq='1'
+	uci -q del_list firewall."$zone".device="$ifn"
+	uci -q add_list firewall."$zone".device="$ifn"
+	uci -q commit firewall
+}
+
+configure() { # configure: from the data_call_act reply in $out
+	local ifn addr mask gw dns1 dns2
+	ifn="$(jget ifname)"
+	addr="$(jget v4_addr)"
+	mask="$(jget v4_mask)"
+	gw="$(jget v4_gw)"
+	dns1="$(jget v4_dns1)"
+	dns2="$(jget v4_dns2)"
+	case "$mask" in
+	''|*[!0-9]*) mask=32 ;;
+	esac
+	if [ -z "$ifn" ] || [ -z "$addr" ]; then
+		log "data call reply lacks ifname/v4_addr: '$out'"
+		return 1
+	fi
+	log "data call up: $ifn $addr/$mask gw ${gw:-none} dns ${dns1:-} ${dns2:-}"
+
+	uci_wan "$ifn" "$dns1" "$dns2"
+	"$INITD/network" reload >/dev/null 2>&1
+	"$INITD/firewall" reload >/dev/null 2>&1
+	# let netifd claim the device before adding the route it must not drop
+	sleep "$SETTLE"
+
+	ip_tol link set "$ifn" up
+	ip_tol addr add "$addr/$mask" dev "$ifn"
+	if [ -n "$gw" ]; then
+		ip_tol route add default via "$gw" dev "$ifn"
+	else
+		ip_tol route add default dev "$ifn"
+	fi
+	return 0
 }
 
 # guard: meta/factory boot mode (stock: atag,boot hexdump field 6 = 0001)
@@ -70,16 +159,24 @@ if [ "$auto" = "1" ]; then
 	exit 0
 fi
 
-# guard: WAN already driven by a MIPC proto
+# guard: WAN driven by a stock vendor MIPC proto, or a user-configured
+# mtkmipc one (APN set). v3.1's auto-created mtkmipc section (no APN) is
+# ours and gets replaced.
 proto="$(uci -q get network.wan.proto)"
 case "$proto" in
-	mipc|ql_mipc|mtkmipc)
+	mipc|ql_mipc)
 		log "network.wan.proto already '$proto': skip"
 		exit 0
 		;;
+	mtkmipc)
+		if [ -n "$(uci -q get network.wan.apn)" ]; then
+			log "network.wan is a configured mtkmipc interface: skip"
+			exit 0
+		fi
+		;;
 esac
 
-# guard: SIM auto-provisioning must be on (proto default 1)
+# guard: auto provisioning must be on (default 1); 0 = manual APN setup
 auto_conf="$(uci -q get network.wan.auto_conf)"
 [ -z "$auto_conf" ] && auto_conf=1
 if [ "$auto_conf" != "1" ]; then
@@ -87,50 +184,52 @@ if [ "$auto_conf" != "1" ]; then
 	exit 0
 fi
 
-# radio on (stock mipc_wan.init check_sim first line; idempotent — the
-# S01 modem init also sets it at boot+25s). The mtkmipc proto verifies
-# the radio state on interface bring-up; setting it here (S99, before
-# the wan section exists) removes the boot-ordering race.
-mipc_wd --nw_radio_state_set 1 >/dev/null 2>&1 || \
-	log "mipc_wan_cli radio-on failed (modem stack down?)"
+elapsed=0 mdinit_n=0 retrig=
+log "waiting for network registration (budget ${BUDGET}s, poll ${POLL}s)"
+while [ "$elapsed" -lt "$BUDGET" ]; do
+	spent=8
+	probe mipc_wan_cli --show_register_status
+	case "$out" in
+	*MIPC_NW_REGISTER_STATE_HOME*|*MIPC_NW_REGISTER_STATE_ROAMING*)
+		log "registered after ${elapsed}s: data call"
+		probe mipc_wan_cli --data_call_act "$ACT_JSON"
+		spent=16
+		result="$(jget result)"
+		if [ "$result" = 0 ]; then
+			if configure; then
+				log "WAN up after ${elapsed}s"
+				exit 0
+			fi
+		elif [ "$result" = 1316594 ]; then
+			log "data call: no registered network (1316594): back to polling"
+		else
+			log "data call failed (result='${result:-none}'): back to polling"
+		fi
+		;;
+	*MIPC_NW_REGISTER_STATE_*)
+		if [ -n "$retrig" ]; then
+			# MD came back after a re-trigger: its radio boots off
+			probe mipc_wan_cli --nw_radio_state_set 1
+			spent=16 retrig=
+		fi
+		;;
+	*)
+		if [ "$mdinit_n" -lt "$MDINIT_MAX" ]; then
+			mdinit_n=$((mdinit_n + 1))
+			log "MD not answering: re-running ccci_mdinit ($mdinit_n/$MDINIT_MAX)"
+			# long-running daemon: background it, never block on it
+			"$MDINIT" 0 >/dev/null 2>&1 &
+			retrig=1
+		fi
+		;;
+	esac
+	# one poll per POLL seconds (probe time included)
+	if [ "$spent" -lt "$POLL" ]; then
+		sleep $((POLL - spent))
+		spent=$POLL
+	fi
+	elapsed=$((elapsed + spent))
+done
 
-# modem health gate (v3.1): if the MD wedged at boot (NV files raced its
-# trigger) the radio never comes on; re-trigger the MD power-on once and
-# wait at most 6 x 10 s, then continue regardless so boot never blocks.
-# ccci_mdinit is backgrounded: it is a long-running daemon (mt6890-modem
-# runs it under procd respawn), so a foreground call could block forever.
-MDINIT="${MTKMIPC_MDINIT:-/usr/bin/ccci_mdinit}"
-MDINIT_SLEEP="${MTKMIPC_MDINIT_SLEEP:-10}"
-out="$(mipc_wd --nw_radio_state_get 0)"
-if [ "$out" != "Get SW radio state:MIPC_NW_RADIO_STATE_ON" ]; then
-	log "radio off or MD down ('$out'); re-triggering cci_mdinit"
-	"$MDINIT" 0 >/dev/null 2>&1 &
-	i=0
-	while [ "$i" -lt 6 ]; do
-		sleep "$MDINIT_SLEEP"
-		i=$((i + 1))
-		out="$(mipc_wd --nw_radio_state_get 0)"
-		[ "$out" = "Get SW radio state:MIPC_NW_RADIO_STATE_ON" ] && break
-	done
-	[ "$out" = "Get SW radio state:MIPC_NW_RADIO_STATE_ON" ] || \
-		log "radio still off after re-trigger; continuing boot"
-fi
-
-# the device network config has no wan/wan6 sections by default, and
-# `uci set network.wan.<opt>` on a missing section fails ("Invalid
-# argument"). Create them as NAMED interface sections: `uci add network
-# wan` would add an anonymous section of type "wan" (cfgXXXX), leaving
-# network.wan missing.
-[ -n "$(uci -q get network.wan)" ] || uci -q set network.wan=interface
-[ -n "$(uci -q get network.wan6)" ] || uci -q set network.wan6=interface
-
-uci batch <<-EOF
-	set network.wan.proto='mtkmipc'
-	set network.wan.ifname='ccmni'
-	set network.wan6.ifname='ccmni'
-	commit network
-EOF
-
-log "created network.wan (proto mtkmipc, APN from SIM): restarting network"
-service network restart
+log "no WAN after ${elapsed}s (budget ${BUDGET}s, ccci_mdinit re-runs: $mdinit_n): giving up"
 exit 0

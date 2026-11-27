@@ -6,9 +6,33 @@ START=95
 STOP=10
 USE_PROCD=1
 
+# v3.1.1 item 1: a single `sleep 3; wifi up` at S95 fires before the vendor
+# stack can bring ra0 up (a manual `wifi up` later always works), so retry
+# a bounded number of times until ra0 reports UP/LOWER_UP. Always exits 0:
+# procd must not respawn-loop and boot is never blocked. Vendor stderr noise
+# from /sbin/wifi is expected and discarded. POSIX sh (busybox ash).
+# MT6890_WIFI_{TRIES,SLEEP,BIN} exist for the host tests only.
+# Kept as text: it is the procd one-shot's `sh -c` body.
+WIFI_UP_SH='tries="${MT6890_WIFI_TRIES:-10}"
+nap="${MT6890_WIFI_SLEEP:-15}"
+wifi_bin="${MT6890_WIFI_BIN:-/sbin/wifi}"
+i=0
+while [ "$i" -lt "$tries" ]; do
+	i=$((i + 1))
+	"$wifi_bin" up >/dev/null 2>&1
+	sleep "$nap"
+	if ip link show ra0 2>/dev/null | grep -qE "[<,](LOWER_UP|UP)[,>]"; then
+		logger -t mt6890-wifi "ra0 up after attempt $i/$tries"
+		exit 0
+	fi
+	logger -t mt6890-wifi "ra0 not up after attempt $i/$tries"
+done
+logger -t mt6890-wifi "ra0 still down after $tries attempts; giving up"
+exit 0'
+
 start_service() {
 	procd_open_instance wifi
-	procd_set_param command /bin/sh -c "sleep 3; /sbin/wifi up >/dev/null 2>&1"
+	procd_set_param command /bin/sh -c "$WIFI_UP_SH"
 	procd_set_param exit 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1

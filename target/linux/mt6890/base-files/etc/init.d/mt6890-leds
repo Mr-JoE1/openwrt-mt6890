@@ -1,21 +1,132 @@
 #!/bin/sh /etc/rc.common
-# Periodic LED state updater. Stock drove SIM/cellular/wifi LEDs from
-# cpe-daemon; 24.10 does not run cpe-daemon. This replaces the subset
-# drivable from verified public CLI verbs only.
+# v3.1.1 item 3: cellular status LEDs. Stock drove them from cpe-daemon;
+# 24.10 does not run cpe-daemon. procd long-running loop (respawn), one poll
+# every 10 s, modem state read through the 8 s probe() watchdog
+# (mipc_wan_cli hangs forever when the MIPC server is down).
+#
+# Panel-verified LED map (the only nodes this service ever writes):
+#   led9514:green:power       power green  always on
+#   led9511:green:lte-rssi    4G green     registered, RAT == LTE
+#   led9508:green:nr-rssi     5G green     registered, RAT == NR
+#   led9502:red:cellular-stat 4G red       searching / not yet home
+#   led9507:red:nr-rssi       5G red       MD down / no response
+#
+# Poll: --show_sim_status (no MIPC_SIM_STATUS_* reply -> MD down), then
+# --show_register_status:
+#   HOME | ROAMING                          -> registered (RAT below)
+#   SEARCHING | NOT_REGISTERED | UNKNOWN    -> searching
+#   no MIPC_NW_REGISTER_STATE_* reply       -> MD down
+# RAT simplification (documented): --show_register_status carries no RAT;
+# when registered, --nw_get_rat is probed (live shape "Current: 3/4/5G")
+# and if its last non-empty line mentions 5G the state is NR, else LTE.
+# This means "5G-capable RAT reported", not "attached on NR".
+# Debounce: a new state is applied only after 2 consecutive identical
+# polls; LEDs are written only when the applied state changes.
+#
+# probe() is the verbatim watchdog except for its temp file: it writes
+# /tmp/.mt6890_leds_g_out, NOT the shared /tmp/.g_out, because the apn
+# script (same probe, /tmp/.g_out) runs concurrently at boot.
+# MT6890_LEDS_{SYSFS,INTERVAL,POLLS} are test knobs only (defaults: real
+# sysfs, 10 s, poll forever). POSIX sh (busybox). Kept as text: it is the
+# procd instance's `sh -c` body.
 START=96
 STOP=5
 USE_PROCD=1
 
+LEDS_SH='PATH=$PATH:/usr/bin:/usr/sbin
+probe() {
+  ( "$@" >/tmp/.mt6890_leds_g_out 2>&1 & gp=$!; sleep 8; kill $gp >/dev/null 2>&1
+    wait $gp >/dev/null 2>&1 )
+  out=$(cat /tmp/.mt6890_leds_g_out 2>/dev/null)
+}
+sysfs="${MT6890_LEDS_SYSFS:-/sys/class/leds}"
+interval="${MT6890_LEDS_INTERVAL:-10}"
+polls="${MT6890_LEDS_POLLS:-}"
+L_PWR="led9514:green:power"
+L_4G="led9511:green:lte-rssi"
+L_5G="led9508:green:nr-rssi"
+L_4R="led9502:red:cellular-stat"
+L_5R="led9507:red:nr-rssi"
+led() {
+	[ -e "$sysfs/$1/brightness" ] || return 0
+	v=0
+	if [ "$2" = 1 ]; then
+		v=$(cat "$sysfs/$1/max_brightness" 2>/dev/null)
+		[ -n "$v" ] || v=1
+	fi
+	echo "$v" > "$sysfs/$1/brightness" 2>/dev/null
+}
+classify() {
+	probe mipc_wan_cli --show_sim_status
+	case "$out" in
+	*MIPC_SIM_STATUS_*) ;;
+	*) st=mdown; return ;;
+	esac
+	probe mipc_wan_cli --show_register_status
+	case "$out" in
+	*MIPC_NW_REGISTER_STATE_HOME*|*MIPC_NW_REGISTER_STATE_ROAMING*) ;;
+	*MIPC_NW_REGISTER_STATE_*) st=search; return ;;
+	*) st=mdown; return ;;
+	esac
+	probe mipc_wan_cli --nw_get_rat
+	last=$(printf "%s\n" "$out" | grep . | tail -n 1)
+	case "$last" in
+	*5G*) st=nr ;;
+	*) st=lte ;;
+	esac
+}
+apply() {
+	g4=0 g5=0 r4=0 r5=0
+	case "$1" in
+	lte) g4=1 ;;
+	nr) g5=1 ;;
+	search) r4=1 ;;
+	mdown) r5=1 ;;
+	esac
+	led "$L_PWR" 1
+	led "$L_4G" "$g4"
+	led "$L_5G" "$g5"
+	led "$L_4R" "$r4"
+	led "$L_5R" "$r5"
+	logger -t mt6890-leds "state -> $1"
+}
+for n in "$L_4G" "$L_5G" "$L_4R" "$L_5R"; do
+	[ -e "$sysfs/$n/trigger" ] && echo none > "$sysfs/$n/trigger" 2>/dev/null
+done
+led "$L_PWR" 1
+applied= cand= seen=0 i=0
+while :; do
+	classify
+	if [ "$st" = "$cand" ]; then
+		seen=$((seen + 1))
+	else
+		cand="$st"; seen=1
+	fi
+	if [ "$seen" -ge 2 ] && [ "$st" != "$applied" ]; then
+		apply "$st"
+		applied="$st"
+	fi
+	i=$((i + 1))
+	[ -n "$polls" ] && [ "$i" -ge "$polls" ] && break
+	sleep "$interval"
+done
+exit 0'
+
 start_service() {
 	procd_open_instance leds
-	procd_set_param command /bin/sh -c "while :; do /lib/mt6890/leds-update.sh; sleep 30; done"
-	procd_set_param file /lib/mt6890/leds-update.sh
+	procd_set_param command /bin/sh -c "$LEDS_SH"
 	procd_set_param respawn
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
 }
 
+# on stop: status LEDs off (power LED and every other node untouched)
 stop_service() {
-	set_state shutdown
+	for n in led9511:green:lte-rssi led9508:green:nr-rssi \
+		 led9502:red:cellular-stat led9507:red:nr-rssi; do
+		[ -e "/sys/class/leds/$n/brightness" ] && \
+			echo 0 > "/sys/class/leds/$n/brightness" 2>/dev/null
+	done
+	return 0
 }

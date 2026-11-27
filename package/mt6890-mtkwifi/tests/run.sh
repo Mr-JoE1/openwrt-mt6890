@@ -226,6 +226,18 @@ check "uci: ra0 main_ifname"  has "$U" "option main_ifname 'ra0'"
 check "uci: rai0 main_ifname" has "$U" "option main_ifname 'rai0'"
 check "uci: no key in image"  hasnt "$U" "option key"
 
+# ---- mt6890-wifi boot one-shot: bounded retry (v3.1.1 item 1); separate
+# script, its per-check results are folded into this suite's totals
+DRV_SHELL="$DRV_SHELL" OPENWRT_TOP="$TOP" sh "$HERE/wifi-boot.sh" > "$T/wifiboot.out" 2>&1
+grep -E '^\[(PASS|FAIL)\] ' "$T/wifiboot.out"
+wp="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\1/p' "$T/wifiboot.out")"
+wf="$(sed -n 's/^RESULT: \([0-9]*\) passed, \([0-9]*\) failed$/\2/p' "$T/wifiboot.out")"
+if [ -n "$wp" ] && [ -n "$wf" ]; then
+	PASS=$((PASS + wp)); FAIL=$((FAIL + wf))
+else
+	bad "wifi-boot.sh: no RESULT line"; cat "$T/wifiboot.out"
+fi
+
 echo "---"
 echo "RESULT: $PASS passed, $FAIL failed (shell: $DRV_SHELL)"
 [ "$FAIL" -eq 0 ]

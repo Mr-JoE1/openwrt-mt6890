@@ -1,21 +1,23 @@
 #!/bin/sh /etc/rc.common
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# One-shot, boot-only job (issue #2, final piece): create the mtkmipc
-# WAN interface so netifd calls the proto handler. All logic lives in
-# /lib/mt6890/apn-wan-setup.sh. S99 = stock mipc_wan.init timing, after
-# the S01 modem daemons (mt6890-modem) and their radio_on step. Plain
-# rc.common on purpose (no USE_PROCD): no instances, no respawn, no
-# retry — re-run `/etc/init.d/mt6890-apn start` manually if the modem
-# stack was not up when this ran at boot.
+# Boot-time cellular WAN bring-up (v3.1.1 item 2). All logic lives in
+# /lib/mt6890/apn-wan-setup.sh: retry until registered (~15 min budget),
+# data call, configure ifname/addr/route/DNS/firewall, exit 0.
+# S99 = stock mipc_wan.init timing, after the S01 modem daemons
+# (mt6890-modem). procd one-shot instance (exit 0, no respawn) so the
+# long retry window runs in the background and never holds up boot.
+# Re-run with `/etc/init.d/mt6890-apn restart`.
 
 START=99
-DESCRIPTION="one-shot: create the mtkmipc WAN interface (APN from SIM)"
+USE_PROCD=1
+DESCRIPTION="cellular WAN: wait for registration, data call, configure"
 
-start() {
-	/bin/sh /lib/mt6890/apn-wan-setup.sh
-}
-
-stop() {
-	:
+start_service() {
+	procd_open_instance apn
+	procd_set_param command /bin/sh /lib/mt6890/apn-wan-setup.sh
+	procd_set_param exit 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
 }
